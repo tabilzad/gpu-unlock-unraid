@@ -53,7 +53,7 @@ jobs:
           test "$(cat dist/firmware/VERSION)" = "${{ steps.nv.outputs.nv }}"
           ls -la dist/firmware/gpu-unlock/*/
           # The generated firmware is NVIDIA's and stays here: nothing is uploaded.
-          rm -rf dist/firmware
+          sudo rm -rf dist/firmware
 
   module:
     name: module build (6.18.58-Unraid, manual)

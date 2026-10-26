@@ -1,0 +1,16 @@
+# Kernels the Modules workflow always keeps built (one per line, `uname -r`).
+#
+# ich777 publishes a prepared tree for every Unraid build, betas and release
+# candidates included (65 of them at or above 6.12 as of 2026-10-26), so the
+# nightly run does not build all of them. It builds the kernels listed here
+# plus any kernel newer than the newest one already released, a few per
+# night, which covers every new Unraid release within a day. Add a line
+# for an older stable release you want covered, or build a single kernel by
+# hand: Actions, Modules, Run workflow, kernels=6.12.54-Unraid.
+#
+# Stable Unraid releases and their kernels:
+6.12.24-Unraid   # Unraid 7.1.x
+6.12.54-Unraid   # Unraid 7.2.0 to 7.2.4
+6.12.98-Unraid   # Unraid 7.2.8
+6.18.54-Unraid   # Unraid 7.3.3
+6.18.58-Unraid   # Unraid 7.3.4

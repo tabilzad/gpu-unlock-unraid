@@ -73,10 +73,14 @@ drive ready for that moment:
 ## Unraid updates and new kernels
 
 The module must match the kernel exactly, so every Unraid release needs its own
-build. The `Modules` workflow runs daily: it lists the kernels ich777 has
-published a tree for, builds those at or above `MIN_KERNEL` that have no
-module yet, and attaches them to a release named after the kernel. A new
-Unraid version is normally covered within a day of its release.
+build. The `Modules` workflow runs daily: it takes the kernels listed in
+`kernels.txt` (the stable Unraid releases) plus every kernel ich777 has
+published a tree for that is newer than the newest one released here, builds
+those that have no module yet (a few per night), and attaches each to a
+release named after the kernel. A new Unraid version is normally covered
+within a day of its release. Any other kernel, for example an older release
+candidate, can be built by hand: Actions, Modules, Run workflow, with the
+kernel version as input.
 
 On the server, `gpu-unlock-ctl check` runs at every boot and daily by cron. It
 reads the kernel version of `/boot/bzimage`, which an Unraid update replaces
