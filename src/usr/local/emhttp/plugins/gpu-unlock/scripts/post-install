@@ -1,0 +1,43 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0-only
+# post-install: runs last in the plg install sequence, on every boot, on
+# install and on every update. It makes the flash drive ready for the next
+# boot (hook copy, modprobe rule, cron job), fetches the module for the
+# running kernel and for a staged Unraid update, and prints a summary.
+# Always exits 0: a failed download must never fail the plugin.
+set -uo pipefail
+
+GU_SCRIPT_NAME=post-install
+# shellcheck source=src/usr/local/emhttp/plugins/gpu-unlock/scripts/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
+mkdir -p "$RUN_DIR" "$FLASH_DIR" 2>/dev/null || true
+if [ ! -x "$CTL_BIN" ]; then
+  echo "$PLUGIN: $CTL_BIN is missing; was the package installed?" >&2
+  exit 0
+fi
+
+"$CTL_BIN" hook-install || true
+"$CTL_BIN" check --quiet || true
+
+running=$(running_kernel)
+targets=$(cmdline_targets)
+if module_ok "$running"; then module_line="module $MODULE_VERSION for $running: on the flash drive"; else module_line="module for $running: NOT available yet (the unlock cannot run on this kernel)"; fi
+if firmware_ok; then fw_line="firmware $NV: on the flash drive"; else fw_line="firmware $NV: NOT generated yet (Settings, GPU Unlock, Generate firmware)"; fi
+if hook_installed; then hook_line="modprobe rule: installed"; else hook_line="modprobe rule: NOT installed (see the warning above)"; fi
+if [ -n "$targets" ]; then targets_line="targets: $targets"; else targets_line="targets: none yet (add gpu_unlock.targets=... in Main, Flash, Syslinux Configuration)"; fi
+
+cat <<EOF
+
+-----------------------------------------------------------
+ $PLUGIN $(plugin_version)
+ $module_line
+ $fw_line
+ $hook_line
+ $targets_line
+ The unlock happens at the next cold boot, before nvidia loads.
+ Status: Settings, User Utilities, GPU Unlock, or 'gpu-unlock-ctl status'.
+-----------------------------------------------------------
+EOF
+log info "installed: plugin $(plugin_version); $module_line; $fw_line; $hook_line; $targets_line"
+exit 0

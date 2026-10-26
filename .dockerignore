@@ -1,0 +1,10 @@
+# Build context for docker/module.Dockerfile: only the cached kernel tarball matters.
+.git
+.github
+.tmp
+dist
+src
+tests
+plugin
+scripts
+*.md

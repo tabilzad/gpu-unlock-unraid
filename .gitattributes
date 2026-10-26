@@ -1,0 +1,5 @@
+# Everything is LF in the working tree too: scripts run inside Linux containers and on Unraid.
+* text=auto eol=lf
+*.png binary
+*.txz binary
+*.tar.xz binary

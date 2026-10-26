@@ -1,0 +1,45 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0-only
+# remove: called by the plg's Method="remove" step. Removes the modprobe rule,
+# the hook, the modules, the cron job, the package and the RAM side. Keeps
+# the generated firmware and the settings (they are the user's, and the
+# firmware took a download); says how to delete them. Safe after a partial
+# install: every step tolerates missing pieces.
+set -uo pipefail
+
+GU_SCRIPT_NAME=remove
+# shellcheck source=src/usr/local/emhttp/plugins/gpu-unlock/scripts/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
+if [ -x "$CTL_BIN" ]; then
+  "$CTL_BIN" uninstall >/dev/null 2>&1 || true
+else
+  rm -f "$MODPROBE_CONF" "$CRON_FILE" "$HOOK_DST" "$DISABLED_MARKER"
+  rm -rf "${MODULES_DIR:?}"
+  [ -x "$UPDATE_CRON_BIN" ] && "$UPDATE_CRON_BIN" >/dev/null 2>&1 || true
+fi
+
+if command -v removepkg >/dev/null 2>&1; then
+  for db in "$ROOT/var/lib/pkgtools/packages" "$ROOT/var/log/packages"; do
+    for entry in "$db/$PLUGIN"-*; do
+      [ -f "$entry" ] || continue
+      ROOT="$ROOT" removepkg "$(basename -- "$entry")" >/dev/null 2>&1 || true
+    done
+  done
+fi
+rm -rf -- "${RUN_DIR:?}" "${EMHTTP_DIR:?}"
+rm -f -- "$CTL_BIN"
+
+cat <<EOF
+
+$PLUGIN removed: the modprobe rule, the boot hook, the modules and the cron job
+are gone from the flash drive. The running kernel is unchanged until the next
+boot. Remove gpu_unlock.targets= from the boot entry (Main, Flash, Syslinux
+Configuration) too.
+
+Kept, because they are yours:
+  ${FIRMWARE_DIR#"$ROOT"}   the generated firmware (about 85 MB)
+  ${CFG_FILE#"$ROOT"}       settings
+To remove them too:  rm -rf ${FLASH_DIR#"$ROOT"}
+EOF
+exit 0

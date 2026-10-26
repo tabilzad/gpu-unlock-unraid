@@ -1,0 +1,108 @@
+#!/usr/bin/env bash
+# lint-plg: static checks for a rendered .plg before it is published.
+#
+#   lint-plg FILE.plg
+#
+# Fails (exit 1, one line per problem) on any of:
+#   - XML that is not well-formed after entity expansion (xmllint --noent)
+#   - a leftover @PLACEHOLDER@ or a bare "&"
+#   - an entity that is defined but unused, or used but undefined
+#   - a <FILE> with <URL> but no <SHA256>, with <MD5>, or with a URL that is not
+#     https under the plugin's own GitHub repository
+#   - a <FILE> with <LOCAL> (test-only construct)
+#   - an INLINE that is not run by /bin/bash, or a step that mentions /mnt
+#   - missing PLUGIN attributes (name, author, version, pluginURL, min, support)
+#   - an empty CHANGES block
+# Comments are ignored; entity references are expanded the way the parser does.
+set -euo pipefail
+
+GIT_URL=https://github.com/tabilzad/gpu-unlock-unraid
+file=${1:-}
+[ -n "$file" ] && [ -r "$file" ] || {
+  echo "usage: lint-plg FILE.plg" >&2
+  exit 2
+}
+
+problems=0
+problem() {
+  printf 'lint-plg: %s\n' "$*" >&2
+  problems=$((problems + 1))
+}
+
+errors=$(xmllint --noent --noout "$file" 2>&1) || problem "not well-formed XML: $(printf '%s' "$errors" | head -n 3 | tr '\n' ' ')"
+
+raw=$(cat -- "$file")
+# The document without comments.
+body=$(printf '%s' "$raw" | perl -0pe 's/<!--.*?-->//gs')
+
+if printf '%s' "$body" | grep -qo '@[A-Z_][A-Z_]*@'; then
+  problem "unreplaced placeholders: $(printf '%s' "$body" | grep -o '@[A-Z_][A-Z_]*@' | sort -u | tr '\n' ' ')"
+fi
+if printf '%s' "$body" | grep -qP '&(?![A-Za-z_][\w.-]*;|#[0-9]+;|#x[0-9A-Fa-f]+;)'; then
+  problem 'bare "&" found; write &amp; or an entity reference'
+fi
+
+# Entities: definitions from the DOCTYPE, references from the whole document.
+declare -A entity
+while IFS= read -r line; do
+  [[ "$line" =~ ^\<!ENTITY[[:space:]]+([A-Za-z_][A-Za-z0-9_.-]*)[[:space:]]+\"([^\"]*)\" ]] || continue
+  name=${BASH_REMATCH[1]}
+  [ -z "${entity[$name]+x}" ] || problem "entity '$name' is defined twice"
+  entity[$name]=${BASH_REMATCH[2]}
+done <<<"$raw"
+used=$(printf '%s' "$body" | grep -o '&[A-Za-z_][A-Za-z0-9_.-]*;' | tr -d '&;' | sort -u || true)
+for e in "${!entity[@]}"; do
+  printf '%s\n' "$used" | grep -qx "$e" || problem "entity '$e' is defined but never used"
+done
+for e in $used; do
+  case "$e" in amp | lt | gt | quot | apos) continue ;; esac
+  [ -n "${entity[$e]+x}" ] || problem "entity '$e' is referenced but not defined"
+done
+
+# expand TEXT: entity references replaced the way the XML parser would.
+expand() {
+  local s=$1 e
+  for _ in 1 2 3 4 5; do
+    for e in "${!entity[@]}"; do
+      s=${s//"&$e;"/"${entity[$e]}"}
+    done
+  done
+  printf '%s' "$s"
+}
+expanded=$(expand "$body")
+
+urls=$(printf '%s\n' "$body" | grep -c '<URL>' || true)
+sums=$(printf '%s\n' "$body" | grep -c '<SHA256>' || true)
+[ "$urls" -eq "$sums" ] || problem "$urls <URL> elements but $sums <SHA256> elements"
+printf '%s' "$body" | grep -q '<MD5>' && problem "<MD5> is not accepted; use <SHA256>"
+printf '%s' "$body" | grep -q '<LOCAL>' && problem "<LOCAL> is a test-only construct"
+while IFS= read -r url; do
+  case "$url" in
+    "$GIT_URL"/*) ;;
+    *) problem "URL is not under $GIT_URL: $url" ;;
+  esac
+done < <(printf '%s\n' "$expanded" | sed -n 's/.*<URL>\(.*\)<\/URL>.*/\1/p')
+
+while IFS= read -r line; do
+  case "$line" in
+    *'<FILE'*'Run="'*)
+      case "$line" in *'Run="/bin/bash"'*) ;; *) problem "FILE with Run must use /bin/bash: $line" ;; esac
+      ;;
+  esac
+done < <(printf '%s\n' "$body" | grep '<FILE' || true)
+if printf '%s\n' "$expanded" | grep -q '/mnt'; then
+  problem "mentions /mnt: $(printf '%s\n' "$expanded" | grep -n '/mnt' | head -n 3 | tr '\n' ' ')"
+fi
+
+plugin_tag=$(printf '%s' "$body" | tr '\n' ' ' | grep -o '<PLUGIN [^>]*>' | head -n1 || true)
+for attr in name author version pluginURL min support; do
+  case "$plugin_tag" in *" $attr=\""*) ;; *) problem "PLUGIN attribute '$attr' is missing" ;; esac
+done
+changes=$(printf '%s' "$expanded" | tr '\n' ' ' | sed -n 's/.*<CHANGES>\(.*\)<\/CHANGES>.*/\1/p')
+[ -n "$(printf '%s' "$changes" | tr -d '[:space:]')" ] || problem "CHANGES block is empty"
+
+if [ "$problems" -gt 0 ]; then
+  printf 'lint-plg: %d problem(s) in %s\n' "$problems" "$file" >&2
+  exit 1
+fi
+printf 'lint-plg: %s ok\n' "$file"

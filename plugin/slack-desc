@@ -1,0 +1,19 @@
+# HOW TO EDIT THIS FILE:
+# The "handy ruler" below makes it easier to edit a package description.
+# Line up the first '|' above the ':' following the base package name, and
+# the '|' on the right side marks the last column you can put a character in.
+# You must make exactly 11 lines for the formatting to be correct.  It's also
+# customary to leave one space after the ':' except on otherwise blank lines.
+
+          |-----handy-ruler------------------------------------------------------|
+gpu-unlock: gpu-unlock (GPU Unlock for Unraid)
+gpu-unlock:
+gpu-unlock: Unraid plugin that loads the gpu_unlock kernel module from
+gpu-unlock: Zagitta/gpu-unlock right before the NVIDIA driver at boot, so that
+gpu-unlock: RTX 30 series cards named on the kernel command line run FP16 and
+gpu-unlock: BF16 at full rate. Fetches the module built for the running Unraid
+gpu-unlock: kernel from GitHub and generates the firmware locally with Docker.
+gpu-unlock:
+gpu-unlock: GPL-2.0-only. Not affiliated with NVIDIA or Lime Technology.
+gpu-unlock:
+gpu-unlock: https://github.com/tabilzad/gpu-unlock-unraid

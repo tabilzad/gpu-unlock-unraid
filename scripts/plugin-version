@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+# plugin-version: derive the Unraid plugin version from a git tag.
+#
+#   plugin-version                 -> 0000.00.00.0-dev (no tag given)
+#   plugin-version --tag v0.1.0    -> 2026.10.26.1 (date of the tag, sequence 1)
+#   plugin-version --tag v0.1.0 --semver -> 0.1.0
+#
+# Unraid's plugin manager compares versions with strcmp(), so every field must
+# have a fixed width for lexical order to match chronological order:
+# YYYY.MM.DD is zero padded and N is a single digit, the position of this tag
+# among the v* tags created on the same UTC day (creator date order). More than
+# nine releases in one day is an error rather than a mis-ordered version.
+#
+# Dev builds use 0000.00.00.0-dev, which sorts below every real release so that
+# installing a release over a dev build is always an "upgrade".
+set -euo pipefail
+
+die() {
+  printf 'plugin-version: %s\n' "$*" >&2
+  exit 1
+}
+
+tag=""
+mode=plugin
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --tag)
+      tag=${2:-}
+      shift 2
+      ;;
+    --semver)
+      mode=semver
+      shift
+      ;;
+    *) die "unknown argument '$1'" ;;
+  esac
+done
+
+if [ -z "$tag" ]; then
+  if [ "$mode" = semver ]; then
+    printf '0.0.0-dev\n'
+  else
+    printf '0000.00.00.0-dev\n'
+  fi
+  exit 0
+fi
+
+[[ "$tag" =~ ^v([0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?)$ ]] || die "tag must look like v1.2.3 or v1.2.3-beta.1: '$tag'"
+semver=${BASH_REMATCH[1]}
+
+if [ "$mode" = semver ]; then
+  printf '%s\n' "$semver"
+  exit 0
+fi
+
+git rev-parse -q --verify "refs/tags/$tag" >/dev/null 2>&1 || die "tag not found: $tag"
+
+# Creator date of the tag (the tag object's date for annotated tags, the commit
+# date for lightweight ones), in UTC.
+tag_epoch=$(git for-each-ref --format='%(creatordate:unix)' "refs/tags/$tag")
+[ -n "$tag_epoch" ] || die "cannot read the creation date of $tag"
+day=$(date -u -d "@$tag_epoch" +%Y.%m.%d)
+day_start=$(date -u -d "$(date -u -d "@$tag_epoch" +%Y-%m-%d) 00:00:00" +%s)
+day_end=$((day_start + 86400))
+
+seq=0
+found=0
+while read -r epoch name; do
+  [ -n "$epoch" ] || continue
+  [[ "$name" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]] || continue
+  if [ "$epoch" -ge "$day_start" ] && [ "$epoch" -lt "$day_end" ]; then
+    seq=$((seq + 1))
+    if [ "$name" = "$tag" ]; then
+      found=1
+      break
+    fi
+  fi
+done < <(git for-each-ref --sort=creatordate --sort=refname --format='%(creatordate:unix) %(refname:short)' refs/tags/)
+
+[ "$found" = 1 ] || die "internal error: $tag not found among same-day tags"
+[ "$seq" -le 9 ] || die "more than nine releases on $day; the version format allows a single sequence digit"
+
+printf '%s.%s\n' "$day" "$seq"

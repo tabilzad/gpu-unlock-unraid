@@ -1,0 +1,134 @@
+Menu="Utilities"
+Type="xmenu"
+Title="GPU Unlock"
+Icon="unlock"
+Markdown="false"
+---
+<?PHP
+/* SPDX-License-Identifier: GPL-2.0-only
+ * GPU Unlock for Unraid: status page. https://github.com/tabilzad/gpu-unlock-unraid
+ * Everything shown comes from `gpu-unlock-ctl status --json`; the buttons post
+ * to include/exec.php (fixed action table, CSRF enforced by Unraid).
+ */
+$docroot ??= ($_SERVER['DOCUMENT_ROOT'] ?: '/usr/local/emhttp');
+require_once "$docroot/plugins/gpu-unlock/include/status.php";
+
+$gu = gu_status();
+$gu_cards = is_array($gu['cards'] ?? null) ? $gu['cards'] : [];
+$gu_modules = is_array($gu['modules'] ?? null) ? $gu['modules'] : [];
+$gu_log = is_array($gu['kernel_log'] ?? null) ? $gu['kernel_log'] : [];
+$gu_fwlog = is_array($gu['firmware_log'] ?? null) ? $gu['firmware_log'] : [];
+$gu_targets = (string) ($gu['targets'] ?? '');
+$gu_suggest = [];
+foreach ($gu_cards as $c) {
+    if (!empty($c['supported'])) {
+        $gu_suggest[] = (string) ($c['address'] ?? '');
+    }
+}
+$gu_suggest_line = 'gpu_unlock.targets=' . ($gu_suggest === [] ? '0000:01:00.0' : implode(',', $gu_suggest));
+$gu_ready = !empty($gu['module_present']) && !empty($gu['firmware_present']) && !empty($gu['hook_installed'])
+    && $gu_targets !== '' && empty($gu['disabled']);
+?>
+<style>
+.gu-ok { color: #3c9b3c; font-weight: bold; }
+.gu-bad { color: #d0342c; font-weight: bold; }
+.gu-table td { padding: 3px 12px 3px 0; vertical-align: top; }
+.gu-table td:first-child { white-space: nowrap; font-weight: bold; }
+#gu-output { max-height: 20em; overflow: auto; white-space: pre-wrap; border: 1px solid #888; padding: 6px; margin-top: 8px; }
+.gu-log { white-space: pre-wrap; font-size: 90%; max-height: 14em; overflow: auto; }
+.gu-buttons input { margin: 2px 6px 2px 0; }
+</style>
+
+<?php if ($gu === []): ?>
+<p class="gu-bad">gpu-unlock-ctl did not answer. Reinstall the plugin, or run <code>gpu-unlock-ctl status</code> in a terminal.</p>
+<?php else: ?>
+
+<table class="gu-table">
+<tr><td>Plugin</td><td><?= gu_h($gu['plugin_version'] ?? '') ?> (gpu_unlock <?= gu_h($gu['module_version'] ?? '') ?>, firmware <?= gu_h($gu['nv'] ?? '') ?>)</td></tr>
+<tr><td>Running kernel</td><td><?= gu_h($gu['kernel'] ?? '') ?> &mdash; module on the flash drive: <?= gu_yesno(!empty($gu['module_present'])) ?></td></tr>
+<?php if (($gu['pending_kernel'] ?? '') !== ''): ?>
+<tr><td>Staged kernel</td><td><?= gu_h($gu['pending_kernel']) ?> (the next boot runs it) &mdash; module on the flash drive: <?= gu_yesno(!empty($gu['pending_module_present'])) ?></td></tr>
+<?php endif; ?>
+<tr><td>Firmware</td><td><?= gu_yesno(!empty($gu['firmware_present']), 'generated', 'not generated yet') ?><?php if (!empty($gu['firmware_job'])): ?> <span class="gu-ok">(generation running, this page refreshes)</span><?php endif; ?></td></tr>
+<tr><td>Modprobe rule</td><td><?= gu_yesno(!empty($gu['hook_installed']), 'installed', 'not installed') ?><?php if (($gu['hook_conflict'] ?? '') !== ''): ?> <span class="gu-bad">conflict: <?= gu_h($gu['hook_conflict']) ?></span><?php endif; ?></td></tr>
+<tr><td>Targets</td><td><?php if ($gu_targets !== ''): ?><code><?= gu_h($gu_targets) ?></code><?php else: ?><span class="gu-bad">none on the kernel command line</span><?php endif; ?></td></tr>
+<tr><td>Enabled</td><td><?= gu_yesno(empty($gu['disabled']), 'yes', 'no (disabled for the next boots)') ?><?php if (!empty($gu['safe_mode'])): ?> <span class="gu-bad">Safe Mode: the hook does nothing</span><?php endif; ?></td></tr>
+<tr><td>This boot</td><td><?= gu_h(($gu['hook_status'] ?? '') !== '' ? $gu['hook_status'] : 'the hook did not run this boot') ?>; gpu_unlock <?= gu_yesno(!empty($gu['module_loaded']), 'loaded', 'not loaded') ?></td></tr>
+<tr><td>Next boot</td><td><?= $gu_ready ? '<span class="gu-ok">ready: power the server off fully, then start it</span>' : '<span class="gu-bad">not ready</span>' ?></td></tr>
+</table>
+
+<?php if ($gu_log !== []): ?>
+<p><strong>Kernel log (gpu_unlock and the nvidia load)</strong></p>
+<pre class="gu-log"><?php foreach ($gu_log as $l): ?><?= gu_h($l) ?>
+<?php endforeach; ?></pre>
+<?php endif; ?>
+
+<p><strong>NVIDIA cards</strong></p>
+<?php if ($gu_cards === []): ?>
+<p>No NVIDIA display controller found.</p>
+<?php else: ?>
+<table class="gu-table">
+<tr><td>Address</td><td>Device id</td><td>Driver</td><td>Supported by gpu_unlock</td></tr>
+<?php foreach ($gu_cards as $c): ?>
+<tr><td><code><?= gu_h($c['address'] ?? '') ?></code></td><td><?= gu_h($c['device'] ?? '') ?></td><td><?= gu_h($c['driver'] ?? '') ?></td><td><?= gu_yesno(!empty($c['supported'])) ?></td></tr>
+<?php endforeach; ?>
+</table>
+<?php endif; ?>
+
+<p><strong>Modules on the flash drive</strong>:
+<?php if ($gu_modules === []): ?>none<?php else: ?>
+<?php foreach ($gu_modules as $i => $m): ?><?= $i ? ', ' : '' ?><?= gu_h($m['kernel'] ?? '') ?><?= empty($m['ok']) ? ' (damaged)' : '' ?><?php endforeach; ?>
+<?php endif; ?></p>
+
+<div class="gu-buttons">
+<input type="button" value="Generate firmware (Docker)" onclick="guAction('firmware')" title="Builds a small image with upstream's generators and runs it: downloads about 340 MB from NVIDIA and CachyOS, checks every file, writes the firmware to the flash drive. Needs the Docker service.">
+<input type="button" value="Fetch module" onclick="guAction('fetch')" title="Download the module built for the running kernel from the GitHub release.">
+<?php if (($gu['pending_kernel'] ?? '') !== ''): ?>
+<input type="button" value="Fetch module for the staged kernel" onclick="guAction('fetch-pending')">
+<?php endif; ?>
+<input type="button" value="Check now" onclick="guAction('check')" title="What the daily cron job does: fetch missing modules for the running and the staged kernel.">
+<?php if (empty($gu['disabled'])): ?>
+<input type="button" value="Disable for the next boots" onclick="guAction('disable')">
+<?php else: ?>
+<input type="button" value="Enable" onclick="guAction('enable')">
+<?php endif; ?>
+<?php if (empty($gu['hook_installed'])): ?>
+<input type="button" value="Install modprobe rule" onclick="guAction('hook-install')">
+<?php endif; ?>
+<input type="button" value="Refresh" onclick="location.reload()">
+</div>
+<pre id="gu-output" style="display:none"></pre>
+<?php if ($gu_fwlog !== []): ?>
+<p><strong>Firmware generation log</strong></p>
+<pre class="gu-log"><?php foreach ($gu_fwlog as $l): ?><?= gu_h($l) ?>
+<?php endforeach; ?></pre>
+<?php endif; ?>
+
+<p><strong>How to opt in</strong></p>
+<ol>
+<li>Make sure the module for the running kernel and the firmware are on the flash drive (above).</li>
+<li>Open <em>Main, Flash, Syslinux Configuration</em> and append the targets to the <code>append</code> line of the normal boot entry (keep what is there; leave the safe-mode entry alone). For the supported card(s) found here:<br>
+<code><?= gu_h($gu_suggest_line) ?></code><br>
+<code>gpu_unlock.targets=all</code> unlocks every supported card that no driver has bound yet.</li>
+<li>Shut the server down fully and power it on. A card the NVIDIA driver already initialised since power-on is refused by design, so a plain reboot is often not enough.</li>
+<li>Back here, "This boot" shows what the hook did and the kernel log shows <code>gpu_unlock: unlocked</code> per card before <code>NVRM: loading NVIDIA</code>.</li>
+</ol>
+<p>After an Unraid update: click <em>Check now</em> before rebooting, so the module for the staged kernel is fetched; otherwise the first boot into the new kernel runs locked, the plugin fetches the module then and asks you for one more power cycle. Builds for new kernels appear at <a href="<?= gu_h($gu['releases'] ?? '') ?>" target="_blank">the releases page</a> within a day.</p>
+<p>Not affiliated with NVIDIA, Lime Technology or the gpu-unlock authors. Module: <a href="https://github.com/Zagitta/gpu-unlock" target="_blank">Zagitta/gpu-unlock</a> (GPL-2.0). The firmware is generated locally from NVIDIA's own downloads and is never redistributed.</p>
+
+<script>
+function guAction(action) {
+  var out = $('#gu-output');
+  out.show().text('Running ' + action + ' ...');
+  $.post('/plugins/gpu-unlock/include/exec.php', {action: action, csrf_token: csrf_token}, null, 'json')
+    .done(function (data) { out.text((data.output || '') + (data.ok ? '' : '\n(exit ' + data.rc + ')')); })
+    .fail(function (xhr) {
+      var data = xhr.responseJSON || {};
+      out.text((data.output || data.error || ('request failed: ' + xhr.status)) + (data.rc !== undefined ? '\n(exit ' + data.rc + ')' : ''));
+    });
+}
+<?php if (!empty($gu['firmware_job'])): ?>
+setTimeout(function () { location.reload(); }, 15000);
+<?php endif; ?>
+</script>
+<?php endif; ?>

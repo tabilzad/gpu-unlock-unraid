@@ -1,0 +1,79 @@
+name: Release
+
+# A tag v* produces a GitHub release carrying the rendered .plg, the package
+# and SHA256SUMS. The plugin manager on Unraid downloads the package from the
+# release and compares it with the sha256 rendered into the plg, so the files
+# attached here are the only place the plugin ever installs from.
+#
+# Every tag is published as a full "latest" release: the plg's pluginURL is
+# "releases/latest/download/gpu-unlock.plg", which is how installed copies
+# find updates. The per-kernel module releases are created with
+# --latest=false by the Modules workflow and never take that spot.
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: build, lint and publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout (with tags, for the date-based plugin version)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - name: make check
+        run: ./scripts/dev-env --root make check
+
+      - name: Build the package and render the plg
+        id: build
+        env:
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          version="$(./scripts/dev-env scripts/plugin-version --tag "$TAG")"
+          semver="$(./scripts/dev-env scripts/plugin-version --tag "$TAG" --semver)"
+          SOURCE_DATE_EPOCH="$(git log -1 --format=%ct "$TAG")"
+          export SOURCE_DATE_EPOCH
+          rm -rf dist
+          ./scripts/dev-env scripts/build-txz --version "$version" --out-dir dist
+          txz="$(ls dist/*.txz)"
+          txz_name="$(basename "$txz")"
+          ./scripts/dev-env scripts/render-plg --version "$version" --plugin-version "$semver" \
+            --txz "$txz" --txz-url "https://github.com/${REPO}/releases/download/${TAG}/${txz_name}" \
+            --out dist/gpu-unlock.plg
+          ./scripts/dev-env scripts/lint-plg dist/gpu-unlock.plg
+          ./scripts/dev-env bash -c 'cd dist && sha256sum -- *.txz *.plg > SHA256SUMS'
+          awk -v v="$semver" '/^## \[/{p = index($0, "[" v "]") > 0} p' CHANGELOG.md > dist/notes.md
+          [ -s dist/notes.md ] || printf 'See CHANGELOG.md for this release.\n' > dist/notes.md
+          {
+            echo
+            echo "Plugin version: \`$version\` (tag $TAG)"
+            echo "gpu_unlock: \`$(sed -n 's/^MODULE_VERSION=//p' versions.env)\` from Zagitta/gpu-unlock@\`$(sed -n 's/^UPSTREAM_REF=//p' versions.env | cut -c1-12)\`, firmware \`$(sed -n 's/^NV=//p' versions.env)\` generated locally"
+            echo
+            echo "Install URL: \`https://github.com/${REPO}/releases/download/${TAG}/gpu-unlock.plg\`"
+          } >> dist/notes.md
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          ls -la dist
+
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ steps.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          gh release create "$TAG" --verify-tag --latest --title "$TAG (plugin $VERSION)" --notes-file dist/notes.md \
+            dist/gpu-unlock.plg dist/*.txz dist/SHA256SUMS

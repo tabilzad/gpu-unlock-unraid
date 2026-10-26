@@ -1,0 +1,143 @@
+#!/usr/bin/env bash
+# build-txz: build the plugin's Slackware package from src/.
+#
+#   build-txz [--version V] [--src DIR] [--out-dir DIR] [--slack-desc FILE]
+#
+# Prints the path of the package. The package is a plain Slackware .txz: the
+# src/ tree rooted at /, plus versions.env as the plugin's gpu-unlock.env and
+# install/slack-desc, packed the way makepkg does (sorted names, "./" first,
+# no "./" prefix on the rest) so that installpkg, upgradepkg and removepkg
+# treat it exactly like a stock package.
+#
+# Reproducible: owner and group are 0, every mtime is SOURCE_DATE_EPOCH (the
+# commit date when unset), xz runs single-threaded.
+#
+# Modes are set here, never taken from the checkout (Windows checkouts lose
+# them): directories 0755, files with a #! line 0755, everything else 0644.
+# Every file under scripts/, hook/, docker/*.sh and usr/local/sbin/ must be
+# executable afterwards, or the build fails.
+#
+# Slackware parses NAME-VERSION-ARCH-BUILD from the file name, so the version
+# must not contain a dash: 0000.00.00.0-dev becomes 0000.00.00.0_dev.
+set -euo pipefail
+
+REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+PLUGIN=gpu-unlock
+readonly REPO_ROOT PLUGIN
+
+die() {
+  printf 'build-txz: %s\n' "$*" >&2
+  exit 1
+}
+
+version=0000.00.00.0-dev
+src="$REPO_ROOT/src"
+out_dir="$REPO_ROOT/dist"
+slack_desc="$REPO_ROOT/plugin/slack-desc"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --version)
+      version=${2:-}
+      shift 2
+      ;;
+    --src)
+      src=${2:-}
+      shift 2
+      ;;
+    --out-dir)
+      out_dir=${2:-}
+      shift 2
+      ;;
+    --slack-desc)
+      slack_desc=${2:-}
+      shift 2
+      ;;
+    *) die "unknown argument '$1'" ;;
+  esac
+done
+
+[[ "$version" =~ ^[0-9]{4}\.[0-9]{2}\.[0-9]{2}\.[0-9](-dev)?$ ]] || die "version must be YYYY.MM.DD.N or 0000.00.00.0-dev, got '$version'"
+[ -d "$src" ] || die "source tree not found: $src"
+[ -f "$slack_desc" ] || die "slack-desc not found: $slack_desc"
+[ "$(grep -c "^$PLUGIN:" "$slack_desc")" -eq 11 ] || die "slack-desc must have exactly 11 '$PLUGIN:' lines"
+[ -f "$REPO_ROOT/versions.env" ] || die "versions.env not found"
+
+pkg_version=${version//-/_}
+pkg_name="$PLUGIN-$pkg_version-noarch-1"
+epoch=${SOURCE_DATE_EPOCH:-}
+if [ -z "$epoch" ]; then
+  epoch=$(git -C "$REPO_ROOT" log -1 --format=%ct 2>/dev/null || true)
+fi
+[[ "$epoch" =~ ^[0-9]+$ ]] || epoch=0
+
+stage=$(mktemp -d "${TMPDIR:-/tmp}/build-txz.XXXXXXXX")
+trap 'rm -rf -- "$stage"' EXIT
+tree="$stage/tree"
+mkdir -- "$tree"
+
+cp -R -- "$src/." "$tree/"
+find "$tree" -name .gitkeep -type f -delete
+plugin_dir="$tree/usr/local/emhttp/plugins/$PLUGIN"
+install -m 0644 -- "$REPO_ROOT/versions.env" "$plugin_dir/$PLUGIN.env"
+
+# Strip CR from text files (grep -I treats NUL-containing files as binary).
+while IFS= read -r -d '' f; do
+  if [ ! -s "$f" ] || grep -Iq . "$f"; then
+    if grep -q $'\r' "$f"; then
+      sed -i 's/\r$//' "$f"
+    fi
+  fi
+done < <(find "$tree" -type f -print0)
+
+find "$tree" -type d -exec chmod 0755 {} +
+find "$tree" -type f -exec chmod 0644 {} +
+while IFS= read -r -d '' f; do
+  if [ "$(head -c 2 -- "$f")" = '#!' ]; then
+    chmod 0755 -- "$f"
+  fi
+done < <(find "$tree" -type f -print0)
+
+missing=0
+while IFS= read -r -d '' f; do
+  case "$f" in
+    */Dockerfile | *.md) continue ;;
+  esac
+  if [ ! -x "$f" ]; then
+    printf 'build-txz: not executable (missing #! line): %s\n' "${f#"$tree"}" >&2
+    missing=1
+  fi
+done < <(find "$plugin_dir/scripts" "$plugin_dir/hook" "$plugin_dir/docker" "$tree/usr/local/sbin" -type f -print0 2>/dev/null)
+[ "$missing" = 0 ] || die "refusing to build with non-executable scripts"
+
+mkdir -m 0755 -- "$tree/install"
+install -m 0644 -- "$slack_desc" "$tree/install/slack-desc"
+
+mkdir -p -- "$out_dir"
+out="$out_dir/$pkg_name.txz"
+tmp_out="$stage/$pkg_name.txz"
+(
+  cd "$tree"
+  find ./ | LC_COLLATE=C sort | sed '2,$s,^\./,,' |
+    tar --no-recursion --format=gnu --owner=0 --group=0 --numeric-owner \
+      --mtime="@$epoch" -T - -cf -
+) | xz -9 -T1 >"$tmp_out"
+
+listing=$(tar -tvJf "$tmp_out")
+while IFS= read -r line; do
+  mode=${line%% *}
+  path=${line##* }
+  case "$path" in
+    usr/local/emhttp/plugins/$PLUGIN/scripts/* | usr/local/emhttp/plugins/$PLUGIN/hook/* | usr/local/sbin/*)
+      case "$path" in *.md | */) continue ;; esac
+      [ "$mode" = "-rwxr-xr-x" ] || die "wrong mode in archive for $path: $mode"
+      ;;
+  esac
+done <<<"$listing"
+if tar -xJOf "$tmp_out" --wildcards 'usr/*' 2>/dev/null | grep -q $'\r'; then
+  die "a CR byte survived in the archive"
+fi
+printf '%s\n' "$listing" | head -n1 | grep -q ' \./$' || die "first archive entry must be ./ (makepkg layout)"
+
+mv -f -- "$tmp_out" "$out"
+(cd "$out_dir" && sha256sum -- "$pkg_name.txz" >"$pkg_name.txz.sha256")
+printf '%s\n' "$out"

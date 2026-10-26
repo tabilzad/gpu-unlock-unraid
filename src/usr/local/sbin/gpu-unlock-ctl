@@ -1,0 +1,448 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0-only
+# gpu-unlock-ctl: the GPU Unlock plugin's command-line tool (also what the
+# settings page and the cron job run).
+#
+#   gpu-unlock-ctl status [--json]      what is on the flash drive, what this boot did, the cards
+#   gpu-unlock-ctl check [--quiet]      fetch the module for the running and the staged kernel, notify
+#   gpu-unlock-ctl fetch [KVER] [--force]   download one kernel's module from the GitHub release
+#   gpu-unlock-ctl firmware [--cache DIR] [--background]   generate the firmware with Docker
+#   gpu-unlock-ctl firmware import DIR  take firmware generated elsewhere (gpu-unlock/<nv>/*.bin)
+#   gpu-unlock-ctl enable | disable     keep everything but skip the unlock on the next boots
+#   gpu-unlock-ctl hook-install         (re)write the modprobe rule, the hook copy and the cron job
+#   gpu-unlock-ctl pending-kernel       the kernel version /boot/bzimage will boot
+#   gpu-unlock-ctl uninstall [--purge]  remove the rule, hook and modules (--purge: firmware and settings too)
+#
+# Nothing here changes the running kernel: the unlock happens at the next boot,
+# right before nvidia loads, and only for the cards named by gpu_unlock.targets=
+# on the kernel command line (Main, Flash, Syslinux Configuration).
+set -uo pipefail
+
+GU_SCRIPT_NAME=gpu-unlock-ctl
+# shellcheck source=src/usr/local/emhttp/plugins/gpu-unlock/scripts/lib.sh
+. "${ROOT:-}/usr/local/emhttp/plugins/gpu-unlock/scripts/lib.sh"
+
+die() {
+  printf 'gpu-unlock-ctl: %s\n' "$*" >&2
+  exit 1
+}
+
+usage() {
+  sed -n '5,15p' "$0"
+}
+
+# ---------------------------------------------------------------------------
+# fetch
+# ---------------------------------------------------------------------------
+
+download() {
+  local proto='=https'
+  # file:// sources: test suite only.
+  [ "$test_mode" = 1 ] && proto='=https,file'
+  curl -fsSL --retry 2 --connect-timeout 15 --max-time 300 --proto "$proto" -o "$2" "$1"
+}
+
+# fetch_module KVER [force]: 0 when the module is present afterwards.
+fetch_module() {
+  local kver=$1 force=${2:-0} base name url tmp expected actual vermagic
+  valid_kver "$kver" || die "not an Unraid kernel version: $kver"
+  [ -n "$MODULE_VERSION" ] || die "gpu-unlock.env is missing; reinstall the plugin"
+  if [ "$force" = 0 ] && module_ok "$kver"; then
+    echo "module $MODULE_VERSION for $kver is already on the flash drive"
+    return 0
+  fi
+  base=$(cfg_get RELEASE_BASE "$RELEASE_BASE_DEFAULT")
+  name="gpu_unlock-$MODULE_VERSION-$kver"
+  url="$base/$kver/$name.ko"
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/gpu-unlock.XXXXXX") || die "mktemp failed"
+  echo "fetching $url"
+  if ! download "$url" "$tmp/gpu_unlock.ko" || ! download "$url.sha256" "$tmp/sha256"; then
+    rm -rf "$tmp"
+    log warning "no module $MODULE_VERSION published for $kver (or no network): $url"
+    return 1
+  fi
+  download "${url%.ko}.manifest.txt" "$tmp/manifest.txt" >/dev/null 2>&1 || true
+  expected=$(cut -d' ' -f1 "$tmp/sha256")
+  actual=$(sha256sum "$tmp/gpu_unlock.ko" | cut -d' ' -f1)
+  if ! [[ "$expected" =~ ^[0-9a-f]{64}$ ]] || [ "$expected" != "$actual" ]; then
+    rm -rf "$tmp"
+    log err "checksum mismatch for $url; not installed"
+    return 1
+  fi
+  if command -v modinfo >/dev/null 2>&1; then
+    vermagic=$(modinfo -F vermagic "$tmp/gpu_unlock.ko" 2>/dev/null || true)
+    if [ "${vermagic%% *}" != "$kver" ] && [ "$test_mode" = 0 ]; then
+      rm -rf "$tmp"
+      log err "downloaded module is for '${vermagic%% *}', not $kver; not installed"
+      return 1
+    fi
+  fi
+  [ -s "$tmp/manifest.txt" ] || printf 'kernel=%s\nmodule_version=%s\n' "$kver" "$MODULE_VERSION" >"$tmp/manifest.txt"
+  grep -q "^module_version=$MODULE_VERSION\$" "$tmp/manifest.txt" || printf 'module_version=%s\n' "$MODULE_VERSION" >>"$tmp/manifest.txt"
+  printf 'source=%s\nfetched=%s\n' "$url" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>"$tmp/manifest.txt"
+  (cd "$tmp" && sha256sum gpu_unlock.ko manifest.txt >SHA256SUMS)
+  mkdir -p "$MODULES_DIR"
+  rm -rf "${MODULES_DIR:?}/$kver"
+  if ! cp -R "$tmp" "$MODULES_DIR/$kver"; then
+    rm -rf "$tmp" "${MODULES_DIR:?}/$kver"
+    die "could not write $MODULES_DIR/$kver"
+  fi
+  rm -rf "$tmp"
+  module_ok "$kver" || die "module written to $MODULES_DIR/$kver but it does not verify"
+  log info "installed module $MODULE_VERSION for $kver on the flash drive"
+  echo "installed module $MODULE_VERSION for $kver under $MODULES_DIR/$kver"
+}
+
+# ---------------------------------------------------------------------------
+# check: running kernel, staged kernel, firmware; notifications
+# ---------------------------------------------------------------------------
+
+check_cmd() {
+  local quiet=0 running pending k problems=0 fetched
+  [ "${1:-}" = --quiet ] && quiet=1
+  running=$(running_kernel)
+  pending=$(pending_kernel || true)
+  [ "$pending" = "$running" ] && pending=""
+  for k in $running $pending; do
+    if module_ok "$k"; then
+      [ "$quiet" = 1 ] || echo "module $MODULE_VERSION for $k: present"
+      continue
+    fi
+    if [ "$quiet" = 1 ]; then fetched=$(fetch_module "$k" 2>&1) && fetched=0 || fetched=1; else fetch_module "$k" && fetched=0 || fetched=1; fi
+    if [ "$fetched" = 0 ]; then
+      if [ "$k" = "$running" ]; then
+        notify normal "GPU Unlock: module for $k installed" \
+          "The module for the running kernel is now on the flash drive. The unlock runs at the next boot: power the server off fully, then start it (a card the driver already initialised is refused)."
+      else
+        notify normal "GPU Unlock: ready for kernel $k" \
+          "The module for the staged Unraid update ($k) is on the flash drive; the unlock carries over after the reboot."
+      fi
+    else
+      problems=1
+      notify_once "nomodule-$k" warning "GPU Unlock: no module for kernel $k" \
+        "No gpu_unlock $MODULE_VERSION build is published for $k yet, so the unlock does not run on that kernel. Builds appear at $RELEASES_PAGE within a day of a new Unraid release; run gpu-unlock-ctl check again later."
+    fi
+  done
+  if ! firmware_ok; then
+    problems=1
+    [ "$quiet" = 1 ] || echo "firmware $NV: missing (gpu-unlock-ctl firmware)"
+    if hook_installed; then
+      notify_once firmware warning "GPU Unlock: firmware not generated yet" \
+        "The unlock cannot run without the locally generated firmware. Open Settings, User Utilities, GPU Unlock and click Generate firmware (needs the Docker service), or run gpu-unlock-ctl firmware."
+    fi
+  else
+    [ "$quiet" = 1 ] || echo "firmware $NV: present"
+  fi
+  return "$problems"
+}
+
+# ---------------------------------------------------------------------------
+# firmware
+# ---------------------------------------------------------------------------
+
+firmware_generate() {
+  local cache="" image build=0 tmpout
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --cache)
+        cache=${2:-}
+        shift 2
+        ;;
+      *) die "unknown firmware option '$1'" ;;
+    esac
+  done
+  [ -n "$NV" ] && [ -n "$UPSTREAM_REF" ] || die "gpu-unlock.env is missing; reinstall the plugin"
+  command -v docker >/dev/null 2>&1 || die "docker is not available: enable the Docker service (Settings, Docker) and start the array"
+  docker info >/dev/null 2>&1 || die "the Docker service is not running: start the array with Docker enabled, then try again"
+  image=$(cfg_get FIRMWARE_IMAGE "")
+  if [ -z "$image" ]; then
+    image="gpu-unlock/firmware-gen:$MODULE_VERSION"
+    docker image inspect "$image" >/dev/null 2>&1 || build=1
+  fi
+  if [ "$build" = 1 ]; then
+    echo "building $image from $EMHTTP_DIR/docker (upstream $UPSTREAM_REPO@${UPSTREAM_REF:0:12})"
+    docker build --pull -t "$image" \
+      --build-arg "UPSTREAM_REPO=$UPSTREAM_REPO" --build-arg "UPSTREAM_REF=$UPSTREAM_REF" \
+      "$EMHTTP_DIR/docker" || die "docker build failed"
+  fi
+  tmpout="$FLASH_DIR/.firmware.new"
+  rm -rf "$tmpout"
+  mkdir -p "$tmpout" || die "cannot write to $FLASH_DIR"
+  echo "generating firmware $NV with $image (downloads about 340 MB of NVIDIA inputs)"
+  if ! docker run --rm -v "$tmpout:/out" ${cache:+-v "$cache:/cache"} "$image"; then
+    rm -rf "$tmpout"
+    die "firmware generation failed"
+  fi
+  if ! (cd "$tmpout" && sha256sum -c SHA256SUMS >/dev/null 2>&1) ||
+    [ "$(cat "$tmpout/VERSION" 2>/dev/null)" != "$NV" ] ||
+    [ ! -s "$tmpout/gpu-unlock/$NV/gsp_ga10x.bin" ]; then
+    rm -rf "$tmpout"
+    die "the generated firmware does not verify; nothing was replaced"
+  fi
+  rm -rf "$FIRMWARE_DIR"
+  mv "$tmpout" "$FIRMWARE_DIR" || die "could not move the firmware into place"
+  rm -f "$RUN_DIR/notified-firmware"
+  log info "firmware $NV generated under $FIRMWARE_DIR"
+  echo "firmware $NV is on the flash drive: $FIRMWARE_DIR"
+}
+
+firmware_import() {
+  local src=$1 tmpout
+  [ -d "$src/gpu-unlock/$NV" ] || die "$src has no gpu-unlock/$NV directory"
+  [ "$(find "$src/gpu-unlock/$NV" -type f -name '*.bin' | wc -l)" -eq 5 ] || die "$src/gpu-unlock/$NV must hold the five firmware files"
+  tmpout="$FLASH_DIR/.firmware.new"
+  rm -rf "$tmpout"
+  mkdir -p "$tmpout" || die "cannot write to $FLASH_DIR"
+  cp -R "$src/." "$tmpout/" || die "copy failed"
+  (
+    cd "$tmpout" || exit 1
+    if [ -f SHA256SUMS ]; then sha256sum -c SHA256SUMS >/dev/null || exit 1; fi
+    printf '%s\n' "$NV" >VERSION
+    # shellcheck disable=SC2094 # SHA256SUMS is excluded from the listing
+    find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum >SHA256SUMS
+  ) || {
+    rm -rf "$tmpout"
+    die "the firmware in $src does not match its SHA256SUMS"
+  }
+  rm -rf "$FIRMWARE_DIR"
+  mv "$tmpout" "$FIRMWARE_DIR" || die "could not move the firmware into place"
+  rm -f "$RUN_DIR/notified-firmware"
+  log info "firmware $NV imported from $src"
+  echo "firmware $NV imported to $FIRMWARE_DIR"
+}
+
+firmware_cmd() {
+  case "${1:-}" in
+    import)
+      [ -n "${2:-}" ] || die "usage: gpu-unlock-ctl firmware import DIR"
+      firmware_import "$2"
+      ;;
+    --background)
+      shift
+      mkdir -p "$RUN_DIR"
+      if [ -s "$FIRMWARE_PID" ] && kill -0 "$(cat "$FIRMWARE_PID")" 2>/dev/null; then
+        echo "firmware generation is already running (pid $(cat "$FIRMWARE_PID")); log: $FIRMWARE_LOG"
+        return 0
+      fi
+      : >"$FIRMWARE_LOG"
+      nohup "$CTL_BIN" firmware "$@" >>"$FIRMWARE_LOG" 2>&1 </dev/null &
+      echo $! >"$FIRMWARE_PID"
+      echo "firmware generation started in the background (pid $!); log: $FIRMWARE_LOG"
+      ;;
+    *) firmware_generate "$@" ;;
+  esac
+}
+
+# ---------------------------------------------------------------------------
+# hook-install
+# ---------------------------------------------------------------------------
+
+hook_install_cmd() {
+  local conflict rc=0
+  mkdir -p "$FLASH_DIR" "$MODULES_DIR" "$MODPROBE_DIR" "$RUN_DIR" || die "cannot create the plugin directories"
+  [ -r "$HOOK_SRC" ] || die "$HOOK_SRC is missing; was the package installed?"
+  if ! cmp -s "$HOOK_SRC" "$HOOK_DST"; then
+    atomic_write "$HOOK_DST" 0755 <"$HOOK_SRC" || die "cannot write $HOOK_DST"
+    echo "hook copied to $HOOK_DST"
+  fi
+  conflict=$(hook_conflict)
+  if [ -n "$conflict" ]; then
+    rc=1
+    log warning "another install-nvidia rule exists, the gpu-unlock rule was not written: $(printf '%s' "$conflict" | tr '\n' ' ')"
+    notify_once conflict warning "GPU Unlock: conflicting modprobe rule" \
+      "Another file in /boot/config/modprobe.d carries an 'install nvidia' rule, which would replace or be replaced by the gpu-unlock rule. Review $(printf '%s' "$conflict" | tr '\n' ' ') and remove it, then run gpu-unlock-ctl hook-install."
+  elif ! hook_installed; then
+    printf '%s\n' "$HOOK_RULE" | atomic_write "$MODPROBE_CONF" 0644 || die "cannot write $MODPROBE_CONF"
+    echo "modprobe rule written to $MODPROBE_CONF"
+  fi
+  printf '%s\n' \
+    "# gpu-unlock: fetch the module for a new or staged Unraid kernel (installed by the plugin)" \
+    "17 4 * * * /usr/local/sbin/gpu-unlock-ctl check --quiet > /dev/null 2>&1" |
+    atomic_write "$CRON_FILE" 0644 || true
+  [ -x "$UPDATE_CRON_BIN" ] && "$UPDATE_CRON_BIN" >/dev/null 2>&1 || true
+  return "$rc"
+}
+
+# ---------------------------------------------------------------------------
+# status
+# ---------------------------------------------------------------------------
+
+json_str() {
+  local s=$1
+  s=${s//\\/\\\\}
+  s=${s//\"/\\\"}
+  s=${s//$'\n'/\\n}
+  s=${s//$'\r'/\\r}
+  s=${s//$'\t'/\\t}
+  printf '"%s"' "$s"
+}
+json_bool() { if "$@"; then printf 'true'; else printf 'false'; fi; }
+json_list() {
+  local first=1 line
+  printf '['
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    [ "$first" = 1 ] || printf ','
+    first=0
+    json_str "$line"
+  done
+  printf ']'
+}
+
+firmware_job_running() {
+  [ -s "$FIRMWARE_PID" ] && kill -0 "$(cat "$FIRMWARE_PID")" 2>/dev/null
+}
+
+status_json() {
+  local running pending conflict targets hook first k line pending_ok
+  running=$(running_kernel)
+  pending=$(pending_kernel || true)
+  [ "$pending" = "$running" ] && pending=""
+  conflict=$(hook_conflict | tr '\n' ' ')
+  targets=$(cmdline_targets)
+  hook=$(cat "$HOOK_STATUS" 2>/dev/null || true)
+  printf '{'
+  printf '"plugin_version":%s,' "$(json_str "$(plugin_version)")"
+  printf '"module_version":%s,' "$(json_str "$MODULE_VERSION")"
+  printf '"nv":%s,' "$(json_str "$NV")"
+  printf '"kernel":%s,' "$(json_str "$running")"
+  printf '"pending_kernel":%s,' "$(json_str "$pending")"
+  printf '"module_present":%s,' "$(json_bool module_ok "$running")"
+  pending_ok=false
+  [ -n "$pending" ] && module_ok "$pending" && pending_ok=true
+  printf '"pending_module_present":%s,' "$pending_ok"
+  printf '"modules":'
+  first=1
+  printf '['
+  for k in "$MODULES_DIR"/*/; do
+    [ -d "$k" ] || continue
+    k=$(basename "$k")
+    [ "$first" = 1 ] || printf ','
+    first=0
+    printf '{"kernel":%s,"ok":%s}' "$(json_str "$k")" "$(json_bool module_ok "$k")"
+  done
+  printf '],'
+  printf '"firmware_present":%s,' "$(json_bool firmware_ok)"
+  printf '"firmware_job":%s,' "$(json_bool firmware_job_running)"
+  printf '"firmware_log":%s,' "$(tail -n 15 "$FIRMWARE_LOG" 2>/dev/null | json_list)"
+  printf '"hook_installed":%s,' "$(json_bool hook_installed)"
+  printf '"hook_conflict":%s,' "$(json_str "${conflict% }")"
+  printf '"disabled":%s,' "$(json_bool test -e "$DISABLED_MARKER")"
+  printf '"safe_mode":%s,' "$(json_bool safe_mode)"
+  printf '"targets":%s,' "$(json_str "$targets")"
+  printf '"module_loaded":%s,' "$(json_bool module_loaded)"
+  printf '"hook_status":%s,' "$(json_str "$hook")"
+  printf '"kernel_log":%s,' "$(kernel_log_lines | tail -n 20 | json_list)"
+  printf '"cards":['
+  first=1
+  while read -r line; do
+    [ -n "$line" ] || continue
+    # shellcheck disable=SC2086 # the line is four space-separated fields
+    set -- $line
+    [ "$first" = 1 ] || printf ','
+    first=0
+    printf '{"address":%s,"device":%s,"driver":%s,"supported":%s}' \
+      "$(json_str "$1")" "$(json_str "$2")" "$(json_str "$3")" "$(json_bool test "$4" = yes)"
+  done < <(nvidia_cards)
+  printf '],'
+  printf '"releases":%s' "$(json_str "$RELEASES_PAGE")"
+  printf '}\n'
+}
+
+status_text() {
+  local running pending targets line
+  running=$(running_kernel)
+  pending=$(pending_kernel || true)
+  [ "$pending" = "$running" ] && pending=""
+  targets=$(cmdline_targets)
+  echo "=== gpu-unlock plugin $(plugin_version), module $MODULE_VERSION, firmware $NV ==="
+  echo "running kernel: $running  module: $(module_ok "$running" && echo present || echo MISSING)"
+  if [ -n "$pending" ]; then
+    echo "staged kernel:  $pending  module: $(module_ok "$pending" && echo present || echo MISSING)"
+  fi
+  echo "firmware:       $(firmware_ok && echo present || echo 'MISSING (gpu-unlock-ctl firmware)')"
+  if hook_installed; then echo "modprobe rule:  installed"; else echo "modprobe rule:  NOT installed (gpu-unlock-ctl hook-install)"; fi
+  [ -z "$(hook_conflict)" ] || echo "CONFLICT:       $(hook_conflict | tr '\n' ' ')"
+  [ ! -e "$DISABLED_MARKER" ] || echo "disabled:       yes (gpu-unlock-ctl enable to undo)"
+  echo "targets:        ${targets:-(none: add gpu_unlock.targets=... in Main, Flash, Syslinux Configuration)}"
+  echo
+  echo "=== this boot ==="
+  echo "hook:           $(cat "$HOOK_STATUS" 2>/dev/null || echo 'no record (hook did not run this boot)')"
+  echo "gpu_unlock:     $(module_loaded && echo loaded || echo 'not loaded')"
+  kernel_log_lines | tail -n 20 | sed 's/^/  /'
+  echo
+  echo "=== NVIDIA cards ==="
+  while read -r line; do
+    [ -n "$line" ] || continue
+    # shellcheck disable=SC2086 # the line is four space-separated fields
+    set -- $line
+    echo "$1  device=$2  driver=$3  supported=$4"
+  done < <(nvidia_cards)
+  if [ -z "$ROOT" ] && command -v nvidia-smi >/dev/null 2>&1; then
+    echo
+    nvidia-smi 2>&1 | head -n 20
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# uninstall
+# ---------------------------------------------------------------------------
+
+uninstall_cmd() {
+  rm -f "$MODPROBE_CONF" "$CRON_FILE"
+  [ -x "$UPDATE_CRON_BIN" ] && "$UPDATE_CRON_BIN" >/dev/null 2>&1 || true
+  rm -rf "${MODULES_DIR:?}" "$HOOK_DST" "$DISABLED_MARKER" "$FLASH_DIR/.firmware.new"
+  if [ "${1:-}" = --purge ]; then
+    rm -rf "${FLASH_DIR:?}"
+    echo "removed the modprobe rule, the hook, the modules, the firmware and the settings"
+  else
+    echo "removed the modprobe rule, the hook and the modules; kept $FIRMWARE_DIR and $CFG_FILE"
+  fi
+  echo "remove gpu_unlock.targets= from the boot entry too; the running kernel is unchanged until the next boot"
+}
+
+# ---------------------------------------------------------------------------
+
+cmd=${1:-status}
+[ $# -gt 0 ] && shift
+case "$cmd" in
+  status)
+    if [ "${1:-}" = --json ]; then status_json; else status_text; fi
+    ;;
+  check) check_cmd "$@" ;;
+  fetch)
+    force=0
+    kver=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --force) force=1 ;;
+        --pending)
+          kver=$(pending_kernel || true)
+          [ -n "$kver" ] || die "cannot read the kernel version of $BZIMAGE"
+          ;;
+        *) kver=$1 ;;
+      esac
+      shift
+    done
+    [ -n "$kver" ] || kver=$(running_kernel)
+    fetch_module "$kver" "$force"
+    ;;
+  firmware) firmware_cmd "$@" ;;
+  enable)
+    rm -f "$DISABLED_MARKER" && echo "enabled for the next boots"
+    ;;
+  disable)
+    mkdir -p "$FLASH_DIR" && : >"$DISABLED_MARKER" && echo "disabled for the next boots; this boot is unchanged"
+    ;;
+  hook-install) hook_install_cmd ;;
+  pending-kernel)
+    pending_kernel || die "cannot read the kernel version of $BZIMAGE"
+    echo
+    ;;
+  uninstall) uninstall_cmd "$@" ;;
+  -h | --help | help) usage ;;
+  *)
+    usage >&2
+    exit 1
+    ;;
+esac

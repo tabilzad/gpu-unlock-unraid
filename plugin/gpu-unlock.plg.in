@@ -1,0 +1,118 @@
+<?xml version="1.0" standalone="yes"?>
+<!-- SPDX-License-Identifier: GPL-2.0-only -->
+<!--
+  GPU Unlock for Unraid: plugin definition template.
+
+  scripts/render-plg replaces every at-sign marker (version, package name,
+  sha256, pinned upstream versions, changelog), then scripts/lint-plg checks
+  the result. Never edit a rendered .plg by hand.
+
+  Design rules:
+  - the only <URL> element is our own small package, cached on the flash drive
+    with a <SHA256>, so a boot with a valid cache never downloads anything;
+  - the kernel module (per kernel, from this repository's releases) and the
+    firmware (generated locally with Docker) are fetched by gpu-unlock-ctl,
+    which degrades gracefully and notifies; a failed <URL> at boot would
+    disable the whole plugin;
+  - every inline step except the package install itself exits 0;
+  - the unlock itself happens at boot through /boot/config/modprobe.d, not here.
+-->
+<!DOCTYPE PLUGIN [
+<!ENTITY name          "gpu-unlock">
+<!ENTITY author        "tabilzad">
+<!ENTITY version       "@VERSION@">
+<!ENTITY pluginVersion "@PLUGIN_VERSION@">
+<!ENTITY moduleVersion "@MODULE_VERSION@">
+<!ENTITY nvVersion     "@NV@">
+<!ENTITY gitURL        "https://github.com/tabilzad/gpu-unlock-unraid">
+<!ENTITY pluginURL     "&gitURL;/releases/latest/download/&name;.plg">
+<!ENTITY support       "&gitURL;/issues">
+<!ENTITY launch        "Settings/GpuUnlock">
+<!ENTITY icon          "unlock">
+<!ENTITY minVer        "7.1.0">
+<!ENTITY txzName       "@TXZ_NAME@">
+<!ENTITY txzURL        "@TXZ_URL@">
+<!ENTITY txzSHA256     "@TXZ_SHA256@">
+<!ENTITY flashDir      "/boot/config/plugins/&name;">
+<!ENTITY emhttpDir     "/usr/local/emhttp/plugins/&name;">
+]>
+
+<PLUGIN name="&name;"
+        author="&author;"
+        version="&version;"
+        pluginURL="&pluginURL;"
+        min="&minVer;"
+        support="&support;"
+        launch="&launch;"
+        icon="&icon;">
+
+<CHANGES>
+##&name;
+###&version; (&pluginVersion;)
+gpu_unlock &moduleVersion; (Zagitta/gpu-unlock), NVIDIA &nvVersion; firmware generated locally.
+
+@CHANGES@
+</CHANGES>
+
+<!-- 1. Directories the later steps rely on. -->
+<FILE Run="/bin/bash" Method="install">
+<INLINE>
+mkdir -p "&flashDir;/pkg" "&flashDir;/modules" "&emhttpDir;"
+exit 0
+</INLINE>
+</FILE>
+
+<!-- 2. The plugin package: the only downloaded element. The plugin manager keeps
+     the cached copy while its SHA256 matches, so boots never hit the network. -->
+<FILE Name="&flashDir;/pkg/&txzName;">
+<URL>&txzURL;</URL>
+<SHA256>&txzSHA256;</SHA256>
+</FILE>
+
+<!-- 3. Install the package and drop older cached packages. This is the one
+     step allowed to fail the install: without the package nothing else works. -->
+<FILE Run="/bin/bash" Method="install">
+<INLINE>
+pkg="&flashDir;/pkg/&txzName;"
+if ! upgradepkg --install-new --reinstall "$pkg"; then
+  echo "&name;: upgradepkg failed for $pkg" >&amp;2
+  exit 1
+fi
+find "&flashDir;/pkg" -maxdepth 1 -type f -name '&name;-*.txz' ! -name '&txzName;' -delete 2>/dev/null
+exit 0
+</INLINE>
+</FILE>
+
+<!-- 4. Hook copy, modprobe rule, cron job, module fetch for the running and the
+     staged kernel, notifications and the install summary. Never fails. -->
+<FILE Run="/bin/bash" Method="install">
+<INLINE>
+script="&emhttpDir;/scripts/post-install"
+if [ -x "$script" ]; then
+  "$script" || echo "&name;: post-install exited with status $? (continuing)" >&amp;2
+else
+  echo "&name;: $script is missing; was the package installed?" >&amp;2
+fi
+exit 0
+</INLINE>
+</FILE>
+
+<!-- Remove: the package's own script does the work. The fallback only runs
+     when the package is not installed (partial install). -->
+<FILE Run="/bin/bash" Method="remove">
+<INLINE>
+if [ -x "&emhttpDir;/scripts/remove" ]; then
+  "&emhttpDir;/scripts/remove" || echo "&name;: remove exited with status $?" >&amp;2
+else
+  echo "&name;: package scripts missing, cleaning up what a partial install leaves behind"
+  rm -f /boot/config/modprobe.d/&name;.conf "&flashDir;/pre-nvidia.sh" "&flashDir;/&name;.cron" "&flashDir;/disabled"
+  rm -rf "&flashDir;/modules" "&flashDir;/pkg" "&emhttpDir;" "/run/&name;"
+  rm -f /usr/local/sbin/gpu-unlock-ctl
+  [ -x /usr/local/sbin/update_cron ] &amp;&amp; /usr/local/sbin/update_cron >/dev/null 2>&amp;1
+  removepkg &name; >/dev/null 2>&amp;1
+  echo "&name;: kept &flashDir;/firmware and &flashDir;/&name;.cfg"
+fi
+exit 0
+</INLINE>
+</FILE>
+</PLUGIN>

@@ -1,0 +1,127 @@
+name: Modules
+
+# Builds gpu_unlock.ko for Unraid kernels and publishes each build as a GitHub
+# release named after the kernel (6.18.58-Unraid, ...), which is where the
+# plugin's gpu-unlock-ctl fetches it from. Once a day the discover job lists
+# every kernel ich777 has published a prepared tree for (one per Unraid
+# release), keeps those at or above MIN_KERNEL, and builds the ones that have
+# no module of the pinned MODULE_VERSION yet. A new Unraid release therefore
+# gets its module without anyone touching this repository. Manual runs can
+# name kernels and force a rebuild.
+#
+# Only GPL code is built here; no NVIDIA file is ever downloaded or published.
+
+on:
+  schedule:
+    - cron: '41 5 * * *'
+  workflow_dispatch:
+    inputs:
+      kernels:
+        description: 'Kernels to build, comma-separated (e.g. 6.18.58-Unraid). Empty: every published kernel without a module yet.'
+        required: false
+        default: ''
+      force:
+        description: 'Rebuild even if the release already carries the module'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: modules
+  cancel-in-progress: false
+
+jobs:
+  discover:
+    name: kernels to build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      kernels: ${{ steps.list.outputs.kernels }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: List kernels
+        id: list
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_KERNELS: ${{ github.event.inputs.kernels }}
+          INPUT_FORCE: ${{ github.event.inputs.force }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          mv=$(sed -n 's/^MODULE_VERSION=//p' versions.env)
+          min=$(sed -n 's/^MIN_KERNEL=//p' versions.env)
+          if [ -n "$INPUT_KERNELS" ]; then
+            list=$(printf '%s' "$INPUT_KERNELS" | tr ',' '\n' | tr -d ' ' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+-Unraid$' || true)
+          else
+            list=$(gh release list -R ich777/unraid_kernel --limit 300 --json tagName -q '.[].tagName' |
+              grep -E '^[0-9]+\.[0-9]+\.[0-9]+-Unraid$' | sort -V)
+            list=$(printf '%s\n' "$list" | while read -r k; do
+              [ -n "$k" ] || continue
+              [ "$(printf '%s\n%s\n' "$min-Unraid" "$k" | sort -V | head -n1)" = "$min-Unraid" ] && echo "$k"
+            done)
+          fi
+          if [ "$INPUT_FORCE" != true ]; then
+            list=$(printf '%s\n' "$list" | while read -r k; do
+              [ -n "$k" ] || continue
+              if gh release view "$k" -R "$REPO" --json assets -q '.assets[].name' 2> /dev/null | grep -qx "gpu_unlock-$mv-$k.ko"; then
+                echo "::notice::$k already has gpu_unlock-$mv-$k.ko" >&2
+                continue
+              fi
+              echo "$k"
+            done)
+          fi
+          json=$(printf '%s\n' "$list" | grep -v '^$' | jq -R . | jq -s -c .)
+          echo "kernels to build: $json"
+          echo "kernels=$json" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: ${{ matrix.kver }}
+    needs: discover
+    if: needs.discover.outputs.kernels != '[]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        kver: ${{ fromJSON(needs.discover.outputs.kernels) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build the module
+        env:
+          KVER: ${{ matrix.kver }}
+        run: ./scripts/build-module --kver "$KVER" --out dist/modules
+
+      - name: Publish to the kernel's release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          KVER: ${{ matrix.kver }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          mv=$(sed -n 's/^MODULE_VERSION=//p' versions.env)
+          ref=$(sed -n 's/^UPSTREAM_REF=//p' versions.env)
+          if ! gh release view "$KVER" -R "$REPO" > /dev/null 2>&1; then
+            notes="gpu_unlock kernel module built for Unraid kernel \`$KVER\` from [Zagitta/gpu-unlock](https://github.com/Zagitta/gpu-unlock) at \`$ref\` (GPL-2.0-only), against the prepared tree from [ich777/unraid_kernel](https://github.com/ich777/unraid_kernel/releases/tag/$KVER).
+
+          The GPU Unlock plugin fetches \`gpu_unlock-<version>-$KVER.ko\` from here by itself. No NVIDIA file is published; the firmware is generated on your server."
+            gh release create "$KVER" -R "$REPO" --target "$GITHUB_SHA" --latest=false \
+              --title "Unraid kernel $KVER" --notes "$notes"
+          fi
+          gh release upload "$KVER" -R "$REPO" --clobber \
+            "dist/modules/gpu_unlock-$mv-$KVER.ko" \
+            "dist/modules/gpu_unlock-$mv-$KVER.ko.sha256" \
+            "dist/modules/gpu_unlock-$mv-$KVER.manifest.txt"
+          cat "dist/modules/gpu_unlock-$mv-$KVER.manifest.txt"

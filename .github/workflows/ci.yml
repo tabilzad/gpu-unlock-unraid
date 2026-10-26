@@ -1,0 +1,73 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: lint and test (Docker dev-env, root)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: make check inside the pinned dev image
+        run: ./scripts/dev-env --root make check
+
+  firmware-gen:
+    name: on-box firmware generator (build and run)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Pinned NVIDIA inputs (cached between runs)
+        id: nv
+        run: echo "nv=$(sed -n 's/^NV=//p' versions.env)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        with:
+          path: .inputs
+          key: nvidia-inputs-${{ steps.nv.outputs.nv }}
+
+      - name: Build the generator image and generate the firmware
+        run: |
+          set -euo pipefail
+          make firmware-gen
+          test "$(find dist/firmware/gpu-unlock -type f -name '*.bin' | wc -l)" -eq 5
+          test "$(cat dist/firmware/VERSION)" = "${{ steps.nv.outputs.nv }}"
+          ls -la dist/firmware/gpu-unlock/*/
+          # The generated firmware is NVIDIA's and stays here: nothing is uploaded.
+          rm -rf dist/firmware
+
+  module:
+    name: module build (6.18.58-Unraid, manual)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: build-module
+        run: ./scripts/build-module --kver 6.18.58-Unraid --out dist/modules
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gpu_unlock-6.18.58-Unraid
+          path: dist/modules/

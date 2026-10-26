@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# Run a command inside the pinned development image, with the repository
+# mounted at /work. The image is built from scripts/devenv/Dockerfile the first
+# time (or whenever that file changes) and reused afterwards.
+#
+#   ./scripts/dev-env make check        # lint + tests
+#   ./scripts/dev-env bash              # interactive shell
+#
+# Only Docker is required on the host. `--root` as the first argument runs the
+# command as root inside the container (the tests install the package into a
+# fake root with Slackware's pkgtools and need /sbin/insmod to exist).
+set -euo pipefail
+
+as_root=0
+if [ "${1:-}" = "--root" ]; then
+  as_root=1
+  shift
+fi
+
+repo=$(cd "$(dirname "$0")/.." && pwd)
+dockerfile="$repo/scripts/devenv/Dockerfile"
+
+# Git Bash on Windows rewrites arguments that look like POSIX paths.
+export MSYS_NO_PATHCONV=1
+export MSYS2_ARG_CONV_EXCL='*'
+
+host_path() {
+  if command -v cygpath >/dev/null 2>&1; then
+    cygpath -w "$1"
+  else
+    printf '%s' "$1"
+  fi
+}
+
+hash=$(sha256sum "$dockerfile" | cut -c1-12)
+image="gpu-unlock-unraid-dev:$hash"
+
+if ! docker image inspect "$image" >/dev/null 2>&1; then
+  echo "dev-env: building $image (first run takes a few minutes)" >&2
+  docker build --quiet -f "$(host_path "$dockerfile")" -t "$image" "$(host_path "$repo/scripts/devenv")" >/dev/null
+fi
+
+mount_src=$(host_path "$repo")
+
+args=(--rm -e IN_DEV_ENV=1 -e HOME=/tmp/home -e SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-0}" -v "$mount_src:/work" -w /work)
+if [ -t 0 ] && [ -t 1 ]; then
+  args+=(-it)
+else
+  args+=(-i)
+fi
+if [ "$as_root" = 0 ]; then
+  case "$(uname -s)" in
+    MINGW* | MSYS* | CYGWIN*) ;;
+    *) args+=(--user "$(id -u):$(id -g)") ;;
+  esac
+fi
+if [ -n "${DEV_ENV_DOCKER_ARGS:-}" ]; then
+  # shellcheck disable=SC2206 # intentional word splitting of user-provided flags
+  args+=($DEV_ENV_DOCKER_ARGS)
+fi
+
+if [ $# -eq 0 ]; then
+  set -- bash
+fi
+exec docker run "${args[@]}" "$image" "$@"

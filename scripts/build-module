@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+# build-module: build gpu_unlock.ko for one Unraid kernel, with Docker.
+#
+#   build-module --kver 6.18.58-Unraid [--out DIR] [--gcc VERSION]
+#
+# 1. downloads ich777's prepared tree for that kernel into docker/cache (kept,
+#    so a rebuild does not download the ~300 MB again),
+# 2. reads the compiler version its .config names (or takes --gcc),
+# 3. runs docker/module.Dockerfile and writes
+#       DIR/gpu_unlock-<MODULE_VERSION>-<KVER>.ko
+#       DIR/gpu_unlock-<MODULE_VERSION>-<KVER>.ko.sha256
+#       DIR/gpu_unlock-<MODULE_VERSION>-<KVER>.manifest.txt
+#
+# Only Docker (with BuildKit) is needed on the host; Git Bash on Windows works.
+set -euo pipefail
+
+REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+readonly REPO_ROOT
+
+die() {
+  printf 'build-module: %s\n' "$*" >&2
+  exit 1
+}
+
+# version_get KEY REGEX: one value from versions.env, validated, never sourced.
+version_get() {
+  local value
+  value=$(sed -n "s/^$1=//p" "$REPO_ROOT/versions.env" | head -n1)
+  [[ "$value" =~ $2 ]] || die "$1 in versions.env is missing or malformed: '$value'"
+  printf '%s' "$value"
+}
+
+kver=""
+out="$REPO_ROOT/dist/modules"
+gcc=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --kver)
+      kver=${2:-}
+      shift 2
+      ;;
+    --out)
+      out=${2:-}
+      shift 2
+      ;;
+    --gcc)
+      gcc=${2:-}
+      shift 2
+      ;;
+    *) die "unknown argument '$1'" ;;
+  esac
+done
+[[ "$kver" =~ ^[0-9]+\.[0-9]+\.[0-9]+-Unraid$ ]] || die "--kver must look like 6.18.58-Unraid, got '$kver'"
+
+upstream_repo=$(version_get UPSTREAM_REPO '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$')
+upstream_ref=$(version_get UPSTREAM_REF '^[0-9a-f]{40}$')
+module_version=$(version_get MODULE_VERSION '^[0-9]+\.[0-9]+\.[0-9]+$')
+
+cache="$REPO_ROOT/docker/cache"
+tarball="$cache/linux-$kver.tar.xz"
+url="https://github.com/ich777/unraid_kernel/releases/download/$kver/linux-$kver.tar.xz"
+mkdir -p "$cache"
+if [ ! -s "$tarball" ]; then
+  echo "build-module: downloading $url" >&2
+  curl -fsSL --retry 3 --proto '=https' -o "$tarball.part" "$url" || {
+    rm -f "$tarball.part"
+    die "no prepared tree for $kver at $url (not a kernel ich777 has published?)"
+  }
+  mv -f "$tarball.part" "$tarball"
+fi
+
+if [ -z "$gcc" ]; then
+  # The tree extracts to its root; the config may be listed as ./.config or .config.
+  config=$(tar -xJOf "$tarball" ./.config 2>/dev/null || tar -xJOf "$tarball" .config 2>/dev/null || true)
+  gcc=$(printf '%s\n' "$config" | sed -n 's/^CONFIG_CC_VERSION_TEXT=".*gcc (GCC) \([0-9][0-9.]*\).*"$/\1/p' | head -n1)
+  [ -n "$gcc" ] || die "could not read CONFIG_CC_VERSION_TEXT from $tarball; pass --gcc"
+fi
+[[ "$gcc" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "gcc version looks wrong: '$gcc'"
+echo "build-module: $kver, gcc $gcc, gpu-unlock $module_version ($upstream_repo@${upstream_ref:0:12})" >&2
+
+# Git Bash rewrites POSIX-looking arguments; Docker wants native paths on Windows.
+export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'
+host_path() {
+  if command -v cygpath >/dev/null 2>&1; then cygpath -w "$1"; else printf '%s' "$1"; fi
+}
+
+mkdir -p "$out"
+DOCKER_BUILDKIT=1 docker build \
+  -f "$(host_path "$REPO_ROOT/docker/module.Dockerfile")" \
+  --target out --output "type=local,dest=$(host_path "$out")" \
+  --build-arg "KVER=$kver" --build-arg "GCC_VERSION=$gcc" \
+  --build-arg "UPSTREAM_REPO=$upstream_repo" --build-arg "UPSTREAM_REF=$upstream_ref" \
+  --build-arg "MODULE_VERSION=$module_version" \
+  "$(host_path "$REPO_ROOT")"
+
+name="gpu_unlock-$module_version-$kver"
+[ -s "$out/$name.ko" ] || die "build produced no $out/$name.ko"
+(cd "$out" && sha256sum -c "$name.ko.sha256" >/dev/null) || die "checksum of $out/$name.ko does not match"
+echo "build-module: $out/$name.ko" >&2
+cat "$out/$name.manifest.txt"
