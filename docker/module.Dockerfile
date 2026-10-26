@@ -71,6 +71,7 @@ RUN set -eu; \
     have=$(gcc -dumpfullversion); \
     [ "$want" = "$have" ] || { echo "kernel ${KVER} was configured with gcc $want but this stage has gcc $have: rebuild with --build-arg GCC_VERSION=$want" >&2; exit 1; }; \
     cp .config /tmp/config; cp Module.symvers /tmp/Module.symvers; \
+    [ ! -s System.map ] || cp System.map /tmp/System.map; \
     make -s mrproper; \
     cp /tmp/config .config; cp /tmp/Module.symvers Module.symvers; \
     make -s olddefconfig; \
@@ -78,8 +79,19 @@ RUN set -eu; \
     rel=$(make -s --no-print-directory kernelrelease); \
     [ "$rel" = "${KVER}" ] || { echo "tree reports kernelrelease $rel, expected ${KVER}" >&2; exit 1; }
 
+# With CONFIG_MODVERSIONS off nothing checks the module's imports at build
+# time, so every undefined symbol must be one the kernel exports (System.map
+# lists them as __ksymtab_<name>); otherwise insmod would fail at boot.
 RUN set -eu; \
     make -C /src/kernel/gpu_unlock KDIR="/usr/src/linux-${KVER}"; \
+    if [ -s /tmp/System.map ]; then \
+        missing=$(nm -u /src/kernel/gpu_unlock/gpu_unlock.ko | awk '{print $2}' | while read -r sym; do \
+            grep -q " __ksymtab_$sym\$" /tmp/System.map || echo "$sym"; done); \
+        [ -z "$missing" ] || { echo "symbols not exported by ${KVER}: $missing" >&2; exit 1; }; \
+        echo "imports: $(nm -u /src/kernel/gpu_unlock/gpu_unlock.ko | wc -l) symbols, all exported by ${KVER}"; \
+    else \
+        echo "no System.map in the tree; import check skipped" >&2; \
+    fi; \
     name="gpu_unlock-${MODULE_VERSION}-${KVER}"; \
     mkdir -p /out; \
     install -m644 /src/kernel/gpu_unlock/gpu_unlock.ko "/out/$name.ko"; \

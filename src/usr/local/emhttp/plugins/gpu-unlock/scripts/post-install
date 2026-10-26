@@ -19,13 +19,15 @@ fi
 
 "$CTL_BIN" hook-install || true
 "$CTL_BIN" check --quiet || true
+# What this boot's unlock did, as a notification (once per boot).
+"$CTL_BIN" report >/dev/null 2>&1 || true
 
 running=$(running_kernel)
-targets=$(cmdline_targets)
+targets=$(effective_targets)
 if module_ok "$running"; then module_line="module $MODULE_VERSION for $running: on the flash drive"; else module_line="module for $running: NOT available yet (the unlock cannot run on this kernel)"; fi
 if firmware_ok; then fw_line="firmware $NV: on the flash drive"; else fw_line="firmware $NV: NOT generated yet (Settings, GPU Unlock, Generate firmware)"; fi
 if hook_installed; then hook_line="modprobe rule: installed"; else hook_line="modprobe rule: NOT installed (see the warning above)"; fi
-if [ -n "$targets" ]; then targets_line="targets: $targets"; else targets_line="targets: none yet (add gpu_unlock.targets=... in Main, Flash, Syslinux Configuration)"; fi
+if [ -n "$targets" ]; then targets_line="targets: $targets ($(targets_source))"; else targets_line="targets: none yet (choose the cards in Settings, User Utilities, GPU Unlock)"; fi
 
 cat <<EOF
 

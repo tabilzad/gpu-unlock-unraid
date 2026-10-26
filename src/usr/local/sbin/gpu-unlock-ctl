@@ -8,14 +8,16 @@
 #   gpu-unlock-ctl fetch [KVER] [--force]   download one kernel's module from the GitHub release
 #   gpu-unlock-ctl firmware [--cache DIR] [--background]   generate the firmware with Docker
 #   gpu-unlock-ctl firmware import DIR  take firmware generated elsewhere (gpu-unlock/<nv>/*.bin)
+#   gpu-unlock-ctl targets [show | set all|ADDR,... | clear]   the cards to unlock (settings page writes this)
 #   gpu-unlock-ctl enable | disable     keep everything but skip the unlock on the next boots
+#   gpu-unlock-ctl report               notify once per boot what the unlock did (post-install runs it)
 #   gpu-unlock-ctl hook-install         (re)write the modprobe rule, the hook copy and the cron job
 #   gpu-unlock-ctl pending-kernel       the kernel version /boot/bzimage will boot
 #   gpu-unlock-ctl uninstall [--purge]  remove the rule, hook and modules (--purge: firmware and settings too)
 #
 # Nothing here changes the running kernel: the unlock happens at the next boot,
-# right before nvidia loads, and only for the cards named by gpu_unlock.targets=
-# on the kernel command line (Main, Flash, Syslinux Configuration).
+# right before nvidia loads, for the cards chosen with `targets` (or named by
+# gpu_unlock.targets= on the kernel command line, which overrides them).
 set -uo pipefail
 
 GU_SCRIPT_NAME=gpu-unlock-ctl
@@ -28,7 +30,7 @@ die() {
 }
 
 usage() {
-  sed -n '5,15p' "$0"
+  sed -n '5,17p' "$0"
 }
 
 # ---------------------------------------------------------------------------
@@ -294,12 +296,12 @@ firmware_job_running() {
 }
 
 status_json() {
-  local running pending conflict targets hook first k line pending_ok
+  local running pending conflict targets hook first k line pending_ok pci state reason power
   running=$(running_kernel)
   pending=$(pending_kernel || true)
   [ "$pending" = "$running" ] && pending=""
   conflict=$(hook_conflict | tr '\n' ' ')
-  targets=$(cmdline_targets)
+  targets=$(effective_targets)
   hook=$(cat "$HOOK_STATUS" 2>/dev/null || true)
   printf '{'
   printf '"plugin_version":%s,' "$(json_str "$(plugin_version)")"
@@ -330,9 +332,21 @@ status_json() {
   printf '"disabled":%s,' "$(json_bool test -e "$DISABLED_MARKER")"
   printf '"safe_mode":%s,' "$(json_bool safe_mode)"
   printf '"targets":%s,' "$(json_str "$targets")"
+  printf '"targets_source":%s,' "$(json_str "$(targets_source)")"
   printf '"module_loaded":%s,' "$(json_bool module_loaded)"
   printf '"hook_status":%s,' "$(json_str "$hook")"
   printf '"kernel_log":%s,' "$(kernel_log_lines | tail -n 20 | json_list)"
+  printf '"verdicts":['
+  first=1
+  while IFS='|' read -r pci state reason power; do
+    [ -n "$pci" ] || continue
+    [ "$first" = 1 ] || printf ','
+    first=0
+    printf '{"address":%s,"state":%s,"reason":%s,"power_off":%s}' \
+      "$(json_str "$pci")" "$(json_str "$state")" "$(json_str "$reason")" "$(json_bool test "$power" = yes)"
+  done < <(verdicts)
+  printf '],'
+  printf '"power_off_required":%s,' "$(json_bool power_off_required)"
   printf '"cards":['
   first=1
   while read -r line; do
@@ -354,7 +368,7 @@ status_text() {
   running=$(running_kernel)
   pending=$(pending_kernel || true)
   [ "$pending" = "$running" ] && pending=""
-  targets=$(cmdline_targets)
+  targets=$(effective_targets)
   echo "=== gpu-unlock plugin $(plugin_version), module $MODULE_VERSION, firmware $NV ==="
   echo "running kernel: $running  module: $(module_ok "$running" && echo present || echo MISSING)"
   if [ -n "$pending" ]; then
@@ -364,11 +378,16 @@ status_text() {
   if hook_installed; then echo "modprobe rule:  installed"; else echo "modprobe rule:  NOT installed (gpu-unlock-ctl hook-install)"; fi
   [ -z "$(hook_conflict)" ] || echo "CONFLICT:       $(hook_conflict | tr '\n' ' ')"
   [ ! -e "$DISABLED_MARKER" ] || echo "disabled:       yes (gpu-unlock-ctl enable to undo)"
-  echo "targets:        ${targets:-(none: add gpu_unlock.targets=... in Main, Flash, Syslinux Configuration)}"
+  case "$(targets_source)" in
+    cmdline) echo "targets:        $targets (kernel command line)" ;;
+    file) echo "targets:        $targets (settings page; gpu-unlock-ctl targets)" ;;
+    *) echo "targets:        none (choose cards in Settings, GPU Unlock, or run gpu-unlock-ctl targets set ...)" ;;
+  esac
   echo
   echo "=== this boot ==="
   echo "hook:           $(cat "$HOOK_STATUS" 2>/dev/null || echo 'no record (hook did not run this boot)')"
   echo "gpu_unlock:     $(module_loaded && echo loaded || echo 'not loaded')"
+  verdicts | awk -F '|' '{ printf "%s: %s%s%s\n", $1, $2, ($3 != "" ? " (" $3 ")" : ""), ($4 == "yes" ? "  POWER OFF REQUIRED" : "") }' | sed 's/^/  /'
   kernel_log_lines | tail -n 20 | sed 's/^/  /'
   echo
   echo "=== NVIDIA cards ==="
@@ -385,6 +404,81 @@ status_text() {
 }
 
 # ---------------------------------------------------------------------------
+# targets: the cards the hook unlocks, kept on the flash drive
+# ---------------------------------------------------------------------------
+
+targets_cmd() {
+  local list pci line found supported
+  case "${1:-show}" in
+    show)
+      case "$(targets_source)" in
+        cmdline) echo "$(cmdline_targets) (from the kernel command line, which overrides the settings file)" ;;
+        file) echo "$(file_targets) (from $TARGETS_FILE)" ;;
+        *) echo "none" ;;
+      esac
+      ;;
+    set)
+      list=${2:-}
+      valid_targets "$list" || die "targets must be 'all' or full PCI addresses separated by commas, like 0000:01:00.0"
+      if [ "$list" != all ]; then
+        for pci in ${list//,/ }; do
+          found=0
+          while read -r line; do
+            [ -n "$line" ] || continue
+            # shellcheck disable=SC2086 # the line is four space-separated fields
+            set -- $line
+            if [ "$1" = "$pci" ]; then
+              found=1
+              supported=$4
+            fi
+          done < <(nvidia_cards)
+          [ "$found" = 1 ] || die "$pci is not an NVIDIA display controller on this server"
+          [ "$supported" = yes ] || die "$pci is not a card gpu_unlock supports (GA102, GA103, GA104, GA106)"
+        done
+      fi
+      printf '%s\n' "$list" | atomic_write "$TARGETS_FILE" 0644 || die "cannot write $TARGETS_FILE"
+      echo "targets set to $list; they apply at the next boot"
+      [ -z "$(cmdline_targets)" ] || echo "note: gpu_unlock.targets=$(cmdline_targets) on the kernel command line overrides this until you remove it"
+      ;;
+    clear)
+      rm -f "$TARGETS_FILE"
+      echo "targets cleared; the hook does nothing at the next boot unless the kernel command line names cards"
+      ;;
+    *) die "usage: gpu-unlock-ctl targets [show | set all|ADDR[,ADDR...] | clear]" ;;
+  esac
+}
+
+# ---------------------------------------------------------------------------
+# report: tell the user what this boot's unlock did, once per boot
+# ---------------------------------------------------------------------------
+
+report_cmd() {
+  local unlocked=0 failed=0 pending=0 lines="" pci state reason power
+  case "$(cat "$HOOK_STATUS" 2>/dev/null)" in loaded:*) ;; *) return 0 ;; esac
+  while IFS='|' read -r pci state reason power; do
+    [ -n "$pci" ] || continue
+    case "$state" in
+      unlocked) unlocked=$((unlocked + 1)) ;;
+      pending) pending=$((pending + 1)) ;;
+      *) failed=$((failed + 1)) ;;
+    esac
+    lines="$lines$pci: $state${reason:+ ($reason)}
+"
+  done < <(verdicts)
+  if power_off_required; then
+    notify_once report alert "GPU Unlock: power off required" \
+      "A card reported that it cannot be unlocked until the server is powered off (not just rebooted). NVIDIA drives it locked for now. $(printf '%s' "$lines" | tr '\n' ' ')"
+  elif [ "$failed" -gt 0 ]; then
+    notify_once report warning "GPU Unlock: $failed card(s) failed to unlock" \
+      "$(printf '%s' "$lines" | tr '\n' ' ') See Settings, User Utilities, GPU Unlock."
+  elif [ "$unlocked" -gt 0 ] && [ "$pending" -eq 0 ]; then
+    notify_once report normal "GPU Unlock: $unlocked card(s) unlocked" \
+      "$(printf '%s' "$lines" | tr '\n' ' ')"
+  fi
+  printf '%s' "$lines"
+}
+
+# ---------------------------------------------------------------------------
 # uninstall
 # ---------------------------------------------------------------------------
 
@@ -396,9 +490,9 @@ uninstall_cmd() {
     rm -rf "${FLASH_DIR:?}"
     echo "removed the modprobe rule, the hook, the modules, the firmware and the settings"
   else
-    echo "removed the modprobe rule, the hook and the modules; kept $FIRMWARE_DIR and $CFG_FILE"
+    echo "removed the modprobe rule, the hook and the modules; kept $FIRMWARE_DIR, $CFG_FILE and $TARGETS_FILE"
   fi
-  echo "remove gpu_unlock.targets= from the boot entry too; the running kernel is unchanged until the next boot"
+  echo "if you put gpu_unlock.targets= on the boot entry, remove it too; the running kernel is unchanged until the next boot"
 }
 
 # ---------------------------------------------------------------------------
@@ -435,6 +529,8 @@ case "$cmd" in
     mkdir -p "$FLASH_DIR" && : >"$DISABLED_MARKER" && echo "disabled for the next boots; this boot is unchanged"
     ;;
   hook-install) hook_install_cmd ;;
+  targets) targets_cmd "$@" ;;
+  report) report_cmd ;;
   pending-kernel)
     pending_kernel || die "cannot read the kernel version of $BZIMAGE"
     echo

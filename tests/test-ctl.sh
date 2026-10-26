@@ -117,6 +117,83 @@ rm -f "$ROOT/elsewhere/gpu-unlock/610.43.03/gsp_ga10x.bin"
 assert_rc "firmware import refuses an incomplete set" 1 ctl firmware import "$ROOT/elsewhere"
 assert "incomplete import left the old firmware alone" test -s "$FLASH/firmware/gpu-unlock/610.43.03/gsp_ga10x.bin"
 
+echo "ctl: targets"
+set_cmdline
+assert "no targets: source none" bash -c "'$ROOT/usr/local/sbin/gpu-unlock-ctl' status --json | grep -q '\"targets_source\":\"none\"'"
+assert_rc "targets set: one supported card" 0 ctl targets set 0000:01:00.0
+assert "targets file written" test "$(cat "$FLASH/targets")" = 0000:01:00.0
+assert_rc "targets set: unsupported card refused" 1 ctl targets set 0000:02:00.0
+assert_rc "targets set: absent card refused" 1 ctl targets set 0000:09:00.0
+assert_rc "targets set: garbage refused" 1 ctl targets set 'all;reboot'
+assert "refusals leave the file alone" test "$(cat "$FLASH/targets")" = 0000:01:00.0
+assert_rc "targets set all" 0 ctl targets set all
+ctl targets >"$out"
+assert_grep "targets show: from the file" '^all (from ' "$out"
+ctl status --json >"$out"
+assert "json: targets from the file" check_json 'd["targets"] == "all" and d["targets_source"] == "file"'
+set_cmdline gpu_unlock.targets=0000:01:00.0
+ctl status --json >"$out"
+assert "json: command line overrides" check_json 'd["targets"] == "0000:01:00.0" and d["targets_source"] == "cmdline"'
+set_cmdline
+assert_rc "targets clear" 0 ctl targets clear
+assert "targets file gone" test ! -e "$FLASH/targets"
+
+echo "ctl: per-card verdicts and the boot report"
+fake_card 0000:03:00.0 0x2204
+ctl targets set all >/dev/null
+printf 'loaded: gpu_unlock for 6.18.58-Unraid\n' >"$ROOT/run/gpu-unlock/hook.status"
+cat >"$ROOT/var/log/dmesg" <<'EOF'
+[   41.198220] gpu_unlock: failure kernel/gpu_unlock/unlock_610.c:1309 unlock_transaction_reset error=-5
+[   41.198301] pci 0000:03:00.0: firmware did not stop; keeping its DMA buffers until power off
+[   41.198305] pci 0000:03:00.0: gpu_unlock: unlock failed (-5)
+[   41.201337] pci 0000:01:00.0: gpu_unlock: unlocked
+[   42.000000] NVRM: loading NVIDIA UNIX Open Kernel Module for x86_64  615.78.08
+EOF
+ctl status --json >"$out"
+assert "json: unlocked verdict" check_json 'any(v["address"] == "0000:01:00.0" and v["state"] == "unlocked" and v["power_off"] is False for v in d["verdicts"])'
+assert "json: power-off verdict with reason" check_json 'any(v["address"] == "0000:03:00.0" and v["state"] == "failed" and v["power_off"] is True and "until power off" in v["reason"] for v in d["verdicts"])'
+assert "json: power_off_required" check_json 'd["power_off_required"] is True'
+: >"$ROOT/notify.log"
+rm -f "$ROOT/run/gpu-unlock/notified-report"
+assert_rc "report" 0 ctl report
+assert_grep "report: alert on power off" 'power off required' "$ROOT/notify.log"
+ctl report >/dev/null
+assert "report: once per boot" test "$(grep -c 'power off required' "$ROOT/notify.log")" = 1
+cat >"$ROOT/var/log/dmesg" <<'EOF'
+[   41.199010] pci 0000:03:00.0: card already initialised since power on (WPR2 enabled); power off first
+[   41.199020] pci 0000:03:00.0: gpu_unlock: unlock failed (-16)
+[   41.201337] pci 0000:01:00.0: gpu_unlock: unlocked
+EOF
+ctl status --json >"$out"
+assert "json: WPR2 verdict" check_json 'any(v["address"] == "0000:03:00.0" and v["power_off"] is True and "WPR2" in v["reason"] for v in d["verdicts"])'
+cat >"$ROOT/var/log/dmesg" <<'EOF'
+[   41.101000] pci 0000:03:00.0: Direct firmware load for gpu-unlock/610.43.03/gsp_ga10x.bin failed with error -2
+[   41.101010] pci 0000:03:00.0: gpu_unlock: firmware load failed (-2)
+[   41.201337] pci 0000:01:00.0: gpu_unlock: unlocked
+EOF
+ctl status --json >"$out"
+assert "json: firmware failure verdict" check_json 'any(v["address"] == "0000:03:00.0" and v["state"] == "failed" and v["reason"] == "firmware load failed (-2)" and v["power_off"] is False for v in d["verdicts"])'
+assert "json: no power off this time" check_json 'd["power_off_required"] is False'
+: >"$ROOT/notify.log"
+rm -f "$ROOT/run/gpu-unlock/notified-report"
+ctl report >/dev/null
+assert_grep "report: warning on failure" '1 card(s) failed to unlock' "$ROOT/notify.log"
+printf '[   41.201337] pci 0000:01:00.0: gpu_unlock: unlocked\n[   41.201400] pci 0000:03:00.0: gpu_unlock: unlocked\n' >"$ROOT/var/log/dmesg"
+: >"$ROOT/notify.log"
+rm -f "$ROOT/run/gpu-unlock/notified-report"
+ctl report >/dev/null
+assert_grep "report: success notification" '2 card(s) unlocked' "$ROOT/notify.log"
+ctl status >"$out"
+assert_grep "status text: verdict line" '0000:03:00.0: unlocked' "$out"
+printf 'skipped: no cards chosen\n' >"$ROOT/run/gpu-unlock/hook.status"
+: >"$ROOT/notify.log"
+rm -f "$ROOT/run/gpu-unlock/notified-report"
+ctl report >/dev/null
+assert "report: silent when the hook did not load" test ! -s "$ROOT/notify.log"
+ctl targets set 0000:01:00.0 >/dev/null
+printf '[    5.0] pci 0000:01:00.0: gpu_unlock: unlocked\n[    6.0] NVRM: loading NVIDIA UNIX Open Kernel Module\n' >"$ROOT/var/log/dmesg"
+set_cmdline gpu_unlock.targets=0000:01:00.0
+
 echo "post-install and remove"
 "$ROOT/usr/local/emhttp/plugins/gpu-unlock/scripts/post-install" >"$out" 2>&1
 assert_rc "post-install exits 0" 0 "$ROOT/usr/local/emhttp/plugins/gpu-unlock/scripts/post-install"

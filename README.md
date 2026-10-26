@@ -39,6 +39,17 @@ drive ready for that moment:
 | `gpu_unlock.ko` for your exact kernel | [releases named after the kernel](https://github.com/tabilzad/gpu-unlock-unraid/releases), built by CI from upstream against [ich777's prepared trees](https://github.com/ich777/unraid_kernel/releases) | `/boot/config/plugins/gpu-unlock/modules/<kernel>/` |
 | firmware (five files, about 85 MB) | generated on your server with Docker by upstream's generators | `/boot/config/plugins/gpu-unlock/firmware/` |
 | the hook and the modprobe rule | the plugin package | `/boot/config/plugins/gpu-unlock/pre-nvidia.sh`, `/boot/config/modprobe.d/gpu-unlock.conf` |
+| the cards to unlock | the settings page (or the kernel command line) | `/boot/config/plugins/gpu-unlock/targets` |
+
+Two other Unraid ports exist, [EEEEgoose/unlockGPU4Unraid](https://github.com/EEEEgoose/unlockGPU4Unraid)
+and [nonkronk/unraid-3090-unlock](https://github.com/nonkronk/unraid-3090-unlock).
+Both blacklist the NVIDIA modules (in modprobe.d or on the kernel command
+line) and load the driver themselves from the plugin phase minutes later,
+which makes them depend on plugin filename order and needs careful fallback
+code so a failed plugin does not leave the server without a driver. The
+install rule used here runs at the moment udev would have loaded the driver,
+so the driver's timing is unchanged and the only failure mode is "no unlock".
+The per-card verdicts and the card selection on the page follow their lead.
 
 ## Requirements
 
@@ -59,16 +70,21 @@ drive ready for that moment:
 2. Settings, User Utilities, GPU Unlock, **Generate firmware (Docker)**. Takes
    a few minutes; the page shows the log. (Or in a terminal:
    `gpu-unlock-ctl firmware`.)
-3. Main, Flash, Syslinux Configuration: append the card(s) to the `append`
-   line of the normal boot entry, keeping what is there. The settings page
-   prints the exact text for the cards it found, for example
-   `gpu_unlock.targets=0000:01:00.0`; `gpu_unlock.targets=all` takes every
-   supported card no driver has bound yet.
-4. Shut the server down fully and power it on. A card the driver initialised
-   since power-on is refused by design, so a plain reboot is often not enough.
-5. The settings page shows what the hook did and the kernel log lines; success
-   is `gpu_unlock: unlocked` for the card before `NVRM: loading NVIDIA`.
-   `gpu-unlock-ctl status` shows the same in a terminal.
+3. On the same page, tick the card(s) to unlock, or "all", and **Save
+   targets**. The choice is kept on the flash drive and applies at the next
+   boot. (The kernel command line still works and overrides the page:
+   `gpu_unlock.targets=0000:01:00.0` on the boot entry in Main, Flash,
+   Syslinux Configuration. `gpu-unlock-ctl targets set ...` does the same as
+   the page from a terminal.)
+4. Reboot. The module refuses a card the driver already initialised since
+   power-on; a plain reboot usually resets the card (unlockGPU4Unraid
+   observed this on two RTX 3080), and a full power off always does. If the
+   page then says "power off required", shut down and power on.
+5. The settings page shows each card's result (unlocked, failed with the
+   module's reason, skipped) and the kernel log lines; success is
+   `gpu_unlock: unlocked` for the card before `NVRM: loading NVIDIA`. A
+   notification reports the outcome once per boot. `gpu-unlock-ctl status`
+   shows the same in a terminal.
 
 ## Unraid updates and new kernels
 
@@ -99,8 +115,9 @@ the pinned version changes.
 ## Disable, remove, recover
 
 - **Disable for the next boots**: the settings page button or
-  `gpu-unlock-ctl disable` (a marker file; `enable` undoes it). Removing
-  `gpu_unlock.targets=` from the boot entry or booting Safe Mode also skips it.
+  `gpu-unlock-ctl disable` (a marker file; `enable` undoes it). Clearing the
+  targets, removing `gpu_unlock.targets=` from the boot entry if you used
+  it, or booting Safe Mode also skips it.
 - **Remove**: uninstall the plugin. The modprobe rule, hook, modules and cron
   job go; the firmware and settings stay under
   `/boot/config/plugins/gpu-unlock` until you delete the directory. Remove the
@@ -112,11 +129,13 @@ the pinned version changes.
 ## Command line
 
 ```
-gpu-unlock-ctl status [--json]       what is staged, what this boot did, the cards
+gpu-unlock-ctl status [--json]       what is staged, each card's result this boot, the cards
+gpu-unlock-ctl targets [show | set all|ADDR,... | clear]   the cards to unlock
 gpu-unlock-ctl check [--quiet]       fetch the module for the running and the staged kernel
 gpu-unlock-ctl fetch [KVER|--pending] [--force]
 gpu-unlock-ctl firmware [--cache DIR] | firmware import DIR
 gpu-unlock-ctl enable | disable
+gpu-unlock-ctl report                notify once per boot what the unlock did
 gpu-unlock-ctl hook-install          rewrite the rule, the hook copy and the cron job
 gpu-unlock-ctl pending-kernel        the kernel /boot/bzimage will boot
 gpu-unlock-ctl uninstall [--purge]

@@ -7,11 +7,12 @@
 #   install nvidia /bin/sh /boot/config/plugins/gpu-unlock/pre-nvidia.sh; \
 #       /sbin/modprobe --ignore-install nvidia $CMDLINE_OPTS
 #
-# It loads the gpu_unlock.ko built for the running kernel, with the targets
-# given as gpu_unlock.targets= on the kernel command line, and never fails the
+# It loads the gpu_unlock.ko built for the running kernel, with the cards
+# chosen on the settings page (the targets file next to this script) or given
+# as gpu_unlock.targets= on the kernel command line, and never fails the
 # nvidia load: every problem is logged (kernel log and /run/gpu-unlock/hook.status)
-# and nvidia loads as usual. Nothing happens without the command-line opt-in,
-# in Safe Mode, or while /boot/config/plugins/gpu-unlock/disabled exists.
+# and nvidia loads as usual. Nothing happens without chosen cards, in Safe
+# Mode, or while /boot/config/plugins/gpu-unlock/disabled exists.
 #
 # Why here: Unraid installs the cached NVIDIA plugin package in rc.modules and
 # udev coldplug loads nvidia before /boot/extra, plugins or the go script run,
@@ -57,15 +58,25 @@ if [ -f "$R/boot/unraidsafemode" ] || grep -qw unraidsafemode "$R/proc/cmdline" 
     status 'skipped: Safe Mode'; exit 0
 fi
 
+# The cards: gpu_unlock.targets= on the kernel command line wins; otherwise
+# the targets file the settings page (gpu-unlock-ctl targets) writes.
 TARGETS=
+SOURCE='the kernel command line'
 # shellcheck disable=SC2013 # the command line is one line of words
 for arg in $(cat "$R/proc/cmdline" 2>/dev/null); do
     case "$arg" in
         gpu_unlock.targets=*) TARGETS=${arg#gpu_unlock.targets=} ;;
     esac
 done
+if [ -z "$TARGETS" ] && [ -r "$BASE/targets" ]; then
+    TARGETS=$(head -n 1 "$BASE/targets" 2>/dev/null | tr -d '\r[:space:]')
+    SOURCE='the settings page'
+    if ! printf '%s' "$TARGETS" | grep -Eq '^(all|[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7](,[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7])*)$'; then
+        status "skipped: malformed targets file $BASE/targets (gpu-unlock-ctl targets set ...)"; exit 0
+    fi
+fi
 if [ -z "$TARGETS" ]; then
-    status 'skipped: no gpu_unlock.targets= on the kernel command line'; exit 0
+    status 'skipped: no cards chosen (Settings, GPU Unlock, or gpu_unlock.targets= on the kernel command line)'; exit 0
 fi
 
 KVER=${GPU_UNLOCK_KVER:-$(uname -r)}
@@ -90,10 +101,10 @@ if [ ! -d "$FWROOT/gpu-unlock" ]; then
     fi
 fi
 
-log "loading gpu_unlock for $KVER with targets=$TARGETS before nvidia"
+log "loading gpu_unlock for $KVER with targets=$TARGETS (from $SOURCE) before nvidia"
 if /sbin/insmod "$KDIR/gpu_unlock.ko" "targets=$TARGETS"; then
-    status "loaded: gpu_unlock for $KVER, targets=$TARGETS (per-card result follows in the kernel log)"
+    status "loaded: gpu_unlock for $KVER, targets=$TARGETS (from $SOURCE); per-card result in the kernel log"
 else
-    status 'failed: insmod gpu_unlock.ko; nvidia loads as usual'
+    status "failed: insmod gpu_unlock.ko with targets=$TARGETS (from $SOURCE); nvidia loads as usual"
 fi
 exit 0

@@ -19,7 +19,7 @@ run_hook() {
 
 echo "hook: opt-in and skip paths"
 assert_rc "no targets: exit 0" 0 run_hook
-assert_grep "no targets: recorded" 'skipped: no gpu_unlock.targets=' "$STATUS"
+assert_grep "no targets: recorded" 'skipped: no cards chosen' "$STATUS"
 
 set_cmdline gpu_unlock.targets=0000:01:00.0
 : >"$FLASH/disabled"
@@ -70,6 +70,26 @@ run_hook &
 run_hook &
 wait
 assert "both concurrent runs finished" test -s "$STATUS"
+
+echo "hook: targets from the settings file"
+set_cmdline
+printf '0000:01:00.0,0000:02:00.0\r\n' >"$FLASH/targets"
+assert_rc "file targets: exit 0" 0 run_hook
+assert_grep "file targets: used, CR stripped" 'targets=0000:01:00.0,0000:02:00.0 (from the settings page)' "$STATUS"
+printf 'all\n' >"$FLASH/targets"
+run_hook
+assert_grep "file targets: all" 'targets=all (from the settings page)' "$STATUS"
+printf 'rm -rf /; 0000:01:00.0\n' >"$FLASH/targets"
+assert_rc "malformed file: exit 0" 0 run_hook
+assert_grep "malformed file: skipped" 'skipped: malformed targets file' "$STATUS"
+printf '0000:01:00.0\n' >"$FLASH/targets"
+set_cmdline gpu_unlock.targets=0000:03:00.0
+run_hook
+assert_grep "command line overrides the file" 'targets=0000:03:00.0 (from the kernel command line)' "$STATUS"
+rm -f "$FLASH/targets"
+set_cmdline
+run_hook
+assert_grep "no targets anywhere: skipped" 'skipped: no cards chosen' "$STATUS"
 
 rm -rf "$ROOT"
 finish

@@ -30,6 +30,7 @@ CFG_FILE="$FLASH_DIR/$PLUGIN.cfg"
 ENV_FILE="$EMHTTP_DIR/$PLUGIN.env"
 CRON_FILE="$FLASH_DIR/$PLUGIN.cron"
 DISABLED_MARKER="$FLASH_DIR/disabled"
+TARGETS_FILE="$FLASH_DIR/targets"
 HOOK_STATUS="$RUN_DIR/hook.status"
 FIRMWARE_LOG="$RUN_DIR/firmware.log"
 FIRMWARE_PID="$RUN_DIR/firmware.pid"
@@ -181,6 +182,88 @@ cmdline_targets() {
   done
 }
 
+# valid_targets STRING: "all" or comma-separated full PCI addresses, as the module takes them.
+valid_targets() {
+  [[ "$1" =~ ^(all|[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7](,[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7])*)$ ]]
+}
+
+# file_targets: the cards chosen on the settings page (empty when unset or malformed).
+file_targets() {
+  local t
+  t=$(head -n 1 "$TARGETS_FILE" 2>/dev/null | tr -d '\r[:space:]')
+  valid_targets "$t" && printf '%s' "$t"
+}
+
+# The kernel command line wins over the settings file, as the hook does it.
+targets_source() {
+  if [ -n "$(cmdline_targets)" ]; then
+    printf 'cmdline'
+  elif [ -n "$(file_targets)" ]; then
+    printf 'file'
+  else
+    printf 'none'
+  fi
+}
+effective_targets() {
+  local t
+  t=$(cmdline_targets)
+  [ -n "$t" ] || t=$(file_targets)
+  printf '%s' "$t"
+}
+
+# target_cards: one address per line; "all" expanded to the supported cards present.
+target_cards() {
+  local t line
+  t=$(effective_targets)
+  [ -n "$t" ] || return 0
+  if [ "$t" = all ]; then
+    while read -r line; do
+      [ -n "$line" ] || continue
+      # shellcheck disable=SC2086 # the line is four space-separated fields
+      set -- $line
+      [ "$4" = yes ] && echo "$1"
+    done < <(nvidia_cards)
+  else
+    printf '%s\n' "$t" | tr ',' '\n'
+  fi
+}
+
+# card_verdict ADDRESS: "STATE|REASON|POWER_OFF" from this boot's kernel log.
+# STATE is unlocked, failed, skipped or pending; POWER_OFF is yes when the module
+# said the card needs a power cycle (WPR2 already up, or firmware that did not stop).
+card_verdict() {
+  local pci=$1 lines mine reason
+  lines=$(kernel_log_lines)
+  mine=$(printf '%s\n' "$lines" | grep -F "pci $pci: " || true)
+  if printf '%s\n' "$mine" | grep -q 'gpu_unlock: unlocked$'; then
+    printf 'unlocked||no\n'
+  elif printf '%s\n' "$mine" | grep -q 'power off'; then
+    reason=$(printf '%s\n' "$mine" | grep 'power off' | head -n 1 | sed "s/.*pci $pci: //")
+    printf 'failed|%s|yes\n' "$reason"
+  elif reason=$(printf '%s\n' "$mine" | grep -o 'gpu_unlock: firmware load failed ([-0-9]*)' | head -n 1) && [ -n "$reason" ]; then
+    printf 'failed|%s|no\n' "${reason#gpu_unlock: }"
+  elif reason=$(printf '%s\n' "$mine" | grep -o 'gpu_unlock: unlock failed ([-0-9]*)' | head -n 1) && [ -n "$reason" ]; then
+    printf 'failed|%s|no\n' "${reason#gpu_unlock: }"
+  elif printf '%s\n' "$lines" | grep -qF "no supported card at \"$pci\""; then
+    printf 'skipped|no supported card at this address|no\n'
+  else
+    printf 'pending|no result in the kernel log|no\n'
+  fi
+}
+
+# verdicts: one line per target card: ADDRESS|STATE|REASON|POWER_OFF
+verdicts() {
+  local pci
+  while read -r pci; do
+    [ -n "$pci" ] || continue
+    printf '%s|%s\n' "$pci" "$(card_verdict "$pci")"
+  done < <(target_cards)
+}
+
+power_off_required() {
+  verdicts | awk -F '|' '$4 == "yes" { found = 1 } END { exit !found }'
+}
+
 safe_mode() {
   [ -f "$ROOT/boot/unraidsafemode" ] || grep -qw unraidsafemode "$CMDLINE" 2>/dev/null
 }
@@ -207,12 +290,14 @@ nvidia_cards() {
   done
 }
 
-# kernel_log_lines: what gpu_unlock and the nvidia load logged this boot.
+# kernel_log_lines: what gpu_unlock and the nvidia load logged this boot,
+# including the module's per-card lines that do not carry its name.
+KERNEL_LOG_RE='gpu[-_]unlock|NVRM: loading|power off first|until power off|Direct firmware load for gpu-unlock'
 kernel_log_lines() {
   if [ -n "$ROOT" ]; then
-    grep -Ei 'gpu[-_]unlock|NVRM: loading' "$ROOT/var/log/dmesg" 2>/dev/null || true
+    grep -E "$KERNEL_LOG_RE" "$ROOT/var/log/dmesg" 2>/dev/null || true
   else
-    dmesg 2>/dev/null | grep -Ei 'gpu[-_]unlock|NVRM: loading' || true
+    dmesg 2>/dev/null | grep -E "$KERNEL_LOG_RE" || true
   fi
 }
 

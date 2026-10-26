@@ -5,6 +5,36 @@ All notable changes to the GPU Unlock plugin for Unraid. The format follows
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-26
+
+Adopts what the other Unraid ports of gpu-unlock do better
+(EEEEgoose/unlockGPU4Unraid, nonkronk/unraid-3090-unlock) without giving up
+the modprobe install rule, which keeps the NVIDIA driver's boot timing and
+never leaves the server without a driver.
+
+### Added
+
+- Card selection on the settings page: tick the supported cards (or "all")
+  and save. The hook reads `/boot/config/plugins/gpu-unlock/targets`; the
+  kernel command line is no longer required, but `gpu_unlock.targets=` on
+  the boot entry still overrides the page. `gpu-unlock-ctl targets` does the
+  same from a terminal and refuses addresses that are not supported cards.
+- Per-card verdicts parsed from the kernel log (unlocked, failed with the
+  module's reason, skipped, pending) on the page, in `status --json` and in
+  `status`, with a "power off required" banner when the module reported
+  WPR2 already up or firmware that did not stop.
+- `gpu-unlock-ctl report`, run by post-install at every boot: one Unraid
+  notification per boot with the outcome (alert for a required power off,
+  warning for failures, normal for success).
+- Module builds check every imported symbol against the kernel's
+  `System.map` (nothing else does with CONFIG_MODVERSIONS off).
+
+### Changed
+
+- Documentation: a plain reboot usually resets a card the driver had
+  initialised (observed by unlockGPU4Unraid on two RTX 3080); a full power
+  off is the sure way, and the page now says so when a card needs it.
+
 ## [0.1.1] - 2026-10-26
 
 ### Fixed
