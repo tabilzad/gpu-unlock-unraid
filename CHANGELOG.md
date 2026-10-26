@@ -5,6 +5,15 @@ All notable changes to the GPU Unlock plugin for Unraid. The format follows
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-10-26
+
+### Fixed
+
+- Module downloads give up after 10 s without a connection and 120 s in
+  total, so a boot without network no longer waits minutes in the plugin
+  install step.
+- A failed download during `check` no longer aborts the rest of the check.
+
 ## [0.1.0] - 2026-10-26
 
 First release. Not yet verified on real hardware by the author; the boot

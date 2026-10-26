@@ -39,7 +39,7 @@ download() {
   local proto='=https'
   # file:// sources: test suite only.
   [ "$test_mode" = 1 ] && proto='=https,file'
-  curl -fsSL --retry 2 --connect-timeout 15 --max-time 300 --proto "$proto" -o "$2" "$1"
+  curl -fsSL --retry 1 --connect-timeout 10 --max-time 120 --proto "$proto" -o "$2" "$1"
 }
 
 # fetch_module KVER [force]: 0 when the module is present afterwards.
@@ -108,7 +108,7 @@ check_cmd() {
       [ "$quiet" = 1 ] || echo "module $MODULE_VERSION for $k: present"
       continue
     fi
-    if [ "$quiet" = 1 ]; then fetched=$(fetch_module "$k" 2>&1) && fetched=0 || fetched=1; else fetch_module "$k" && fetched=0 || fetched=1; fi
+    if [ "$quiet" = 1 ]; then (fetch_module "$k") >/dev/null 2>&1 && fetched=0 || fetched=1; else (fetch_module "$k") && fetched=0 || fetched=1; fi
     if [ "$fetched" = 0 ]; then
       if [ "$k" = "$running" ]; then
         notify normal "GPU Unlock: module for $k installed" \
