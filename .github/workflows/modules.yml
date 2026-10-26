@@ -74,7 +74,7 @@ jobs:
             newer=$(printf '%s\n' "$published" | while read -r k; do
               [ -n "$k" ] || continue
               ge "$k" "$min-Unraid" || continue
-              [ "$k" != "$top" ] && ge "$k" "$top" || continue
+              if [ "$k" = "$top" ] || ! ge "$k" "$top"; then continue; fi
               printf '%s\n' "$ours" | grep -qx "$k" || echo "$k"
             done)
             list=$(printf '%s\n%s\n' "$listed" "$newer" | grep -v '^$' | sort -uV)
