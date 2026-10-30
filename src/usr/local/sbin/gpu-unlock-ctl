@@ -122,7 +122,7 @@ check_cmd() {
     else
       problems=1
       notify_once "nomodule-$k" warning "GPU Unlock: no module for kernel $k" \
-        "No gpu_unlock $MODULE_VERSION build is published for $k yet, so the unlock does not run on that kernel. Builds appear at $RELEASES_PAGE within a day of a new Unraid release; run gpu-unlock-ctl check again later."
+        "The module for $k could not be fetched, so the unlock does not run on that kernel: either no gpu_unlock $MODULE_VERSION build is published for it yet (builds appear at $RELEASES_PAGE within a day of a new Unraid release) or the download failed, for example without network early in the boot. Click Check now in Settings, User Utilities, GPU Unlock, or run gpu-unlock-ctl check, to try again."
     fi
   done
   if ! firmware_ok; then
@@ -385,8 +385,16 @@ status_text() {
   esac
   echo
   echo "=== this boot ==="
-  echo "hook:           $(cat "$HOOK_STATUS" 2>/dev/null || echo 'no record (hook did not run this boot)')"
-  echo "gpu_unlock:     $(module_loaded && echo loaded || echo 'not loaded')"
+  if [ -s "$HOOK_STATUS" ]; then
+    echo "hook:           $(cat "$HOOK_STATUS")"
+    echo "gpu_unlock:     $(module_loaded && echo loaded || echo 'not loaded')"
+  else
+    # Normal right after the install: the rule only fires when nvidia loads.
+    echo "hook:           no record (did not run this boot)"
+    echo "                expected until the next boot, when the modprobe rule runs it as nvidia loads;"
+    echo "                still so after a reboot means nvidia did not load (is the Nvidia-Driver plugin installed?)"
+    echo "gpu_unlock:     $(module_loaded && echo 'loaded (not by the hook)' || echo 'not loaded (expected until the next boot)')"
+  fi
   verdicts | awk -F '|' '{ printf "%s: %s%s%s\n", $1, $2, ($3 != "" ? " (" $3 ")" : ""), ($4 == "yes" ? "  POWER OFF REQUIRED" : "") }' | sed 's/^/  /'
   kernel_log_lines | tail -n 20 | sed 's/^/  /'
   echo
@@ -455,10 +463,16 @@ targets_cmd() {
 report_cmd() {
   local unlocked=0 failed=0 pending=0 lines="" pci state reason power
   case "$(cat "$HOOK_STATUS" 2>/dev/null)" in loaded:*) ;; *) return 0 ;; esac
+  # Keep this boot's kernel log lines: the ring buffer forgets them after
+  # enough uptime, and the verdicts are read from them as long as the boot lasts.
+  if [ ! -s "$KERNEL_LOG_SNAPSHOT" ]; then
+    kernel_log_lines | atomic_write "$KERNEL_LOG_SNAPSHOT" 0644 2>/dev/null || true
+  fi
   while IFS='|' read -r pci state reason power; do
     [ -n "$pci" ] || continue
     case "$state" in
       unlocked) unlocked=$((unlocked + 1)) ;;
+      skipped) ;; # a card held by another driver, or no card at the address: deliberate, not a failure
       pending) pending=$((pending + 1)) ;;
       *) failed=$((failed + 1)) ;;
     esac

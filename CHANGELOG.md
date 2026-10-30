@@ -5,6 +5,34 @@ All notable changes to the GPU Unlock plugin for Unraid. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- The nightly Modules workflow failed every night since 2026-10-28, as soon
+  as every kernel in scope already had its module: an empty list fed to
+  `grep -v` under `pipefail` ended the discover step with exit 1. Blank
+  lines are now dropped with `sed`, and an empty list prints "nothing to
+  build".
+- A supported card that another driver held at boot (vfio-pci for a VM,
+  which `all` does not avoid) is reported as "skipped (bound to vfio-pci at
+  boot)" instead of "failed (unlock failed (-16))", and no longer triggers
+  a warning notification at every boot.
+- Per-card verdicts and the kernel log on the page no longer turn into
+  "pending (no result in the kernel log)" after enough uptime for the
+  kernel's ring buffer to forget the boot: `report` keeps a copy of the
+  lines in `/run/gpu-unlock/kernel.log` at boot.
+
+### Changed
+
+- `status` and the page explain that no hook record and gpu_unlock not
+  loaded are expected until the first boot after the install, and what it
+  means if it stays so after a reboot (reported in #1).
+- The "no module for kernel" notification names a failed download as the
+  other possible cause, and how to retry.
+- README: the status reflects the real-hardware confirmation in #1 (RTX 3090
+  and RTX 3060 on Unraid 7.3.4), and the Nvidia-Driver plugin is listed as
+  required, since the hook only runs when `nvidia` loads.
+- The two remaining GitHub Actions in CI are pinned by commit like the rest.
+
 ## [0.2.0] - 2026-10-26
 
 Adopts what the other Unraid ports of gpu-unlock do better

@@ -6,10 +6,14 @@ of GeForce RTX 30 series cards (GA102, GA103, GA104, GA106: RTX 3090, 3080 Ti,
 3080, 3070, 3060 ...) before the NVIDIA driver binds them. The driver itself is
 not patched.
 
-Status: **0.1.0, early**. The mechanism is the one reported working on Unraid
-7.3.4 with an RTX 3090 in [gpu-unlock#55](https://github.com/Zagitta/gpu-unlock/issues/55);
-the plugin around it has been tested against an emulated host, not yet on the
-author's server. Please report what happens on yours.
+Status: **0.2.x**. Confirmed on real hardware by a user in
+[#1](https://github.com/tabilzad/gpu-unlock-unraid/issues/1): Unraid 7.3.4
+(kernel 6.18.58) with an RTX 3090, and a second server with an RTX 3060
+(GA104), both unlocked at the first power cycle. An Unraid update that was
+already staged on the flash drive at install time had its module fetched in
+advance, and the unlock carried over the reboot. The mechanism is the one
+reported working in [gpu-unlock#55](https://github.com/Zagitta/gpu-unlock/issues/55).
+Please report what happens on yours.
 
 > Not affiliated with NVIDIA, Lime Technology or the gpu-unlock authors.
 > Everything here is GPL-2.0-only. No NVIDIA file is redistributed: the
@@ -55,8 +59,9 @@ The per-card verdicts and the card selection on the page follow their lead.
 
 - Unraid 7.1.0 or newer (kernel 6.12 or newer). Tested kernels: whatever has a
   release in this repository; 7.3.4 (`6.18.58-Unraid`) is the first.
-- A supported card, and the Nvidia-Driver plugin if you use the card in
-  containers (the plugin does not need it to unlock).
+- A supported card and the Nvidia-Driver plugin: the hook runs when the
+  `nvidia` module loads, so without the driver nothing triggers the unlock
+  (and nothing would use the unlocked rate).
 - Docker enabled, once, to generate the firmware (about 340 MB downloaded from
   download.nvidia.com and archive.cachyos.org, every file checksummed).
 - About 90 MB free on the flash drive.

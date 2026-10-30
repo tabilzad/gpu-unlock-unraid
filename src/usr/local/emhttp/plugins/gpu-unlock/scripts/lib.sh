@@ -34,6 +34,7 @@ TARGETS_FILE="$FLASH_DIR/targets"
 HOOK_STATUS="$RUN_DIR/hook.status"
 FIRMWARE_LOG="$RUN_DIR/firmware.log"
 FIRMWARE_PID="$RUN_DIR/firmware.pid"
+KERNEL_LOG_SNAPSHOT="$RUN_DIR/kernel.log"
 NOTIFY_BIN="$ROOT/usr/local/emhttp/webGui/scripts/notify"
 UPDATE_CRON_BIN="$ROOT/usr/local/sbin/update_cron"
 CTL_BIN="$ROOT/usr/local/sbin/gpu-unlock-ctl"
@@ -229,10 +230,11 @@ target_cards() {
 }
 
 # card_verdict ADDRESS: "STATE|REASON|POWER_OFF" from this boot's kernel log.
-# STATE is unlocked, failed, skipped or pending; POWER_OFF is yes when the module
+# STATE is unlocked, failed, skipped (no supported card at the address, or a
+# card another driver held at boot) or pending; POWER_OFF is yes when the module
 # said the card needs a power cycle (WPR2 already up, or firmware that did not stop).
 card_verdict() {
-  local pci=$1 lines mine reason
+  local pci=$1 lines mine reason drv
   lines=$(kernel_log_lines)
   mine=$(printf '%s\n' "$lines" | grep -F "pci $pci: " || true)
   if printf '%s\n' "$mine" | grep -q 'gpu_unlock: unlocked$'; then
@@ -243,7 +245,14 @@ card_verdict() {
   elif reason=$(printf '%s\n' "$mine" | grep -o 'gpu_unlock: firmware load failed ([-0-9]*)' | head -n 1) && [ -n "$reason" ]; then
     printf 'failed|%s|no\n' "${reason#gpu_unlock: }"
   elif reason=$(printf '%s\n' "$mine" | grep -o 'gpu_unlock: unlock failed ([-0-9]*)' | head -n 1) && [ -n "$reason" ]; then
-    printf 'failed|%s|no\n' "${reason#gpu_unlock: }"
+    # -EBUSY with no WPR2 line: a driver held the card when the module ran
+    # (vfio-pci for a VM, which "all" does not avoid). Deliberate, not a failure.
+    drv=$(card_driver "$pci")
+    if [ "$reason" = 'gpu_unlock: unlock failed (-16)' ] && [ -n "$drv" ] && [ "$drv" != nvidia ]; then
+      printf 'skipped|bound to %s at boot|no\n' "$drv"
+    else
+      printf 'failed|%s|no\n' "${reason#gpu_unlock: }"
+    fi
   elif printf '%s\n' "$lines" | grep -qF "no supported card at \"$pci\""; then
     printf 'skipped|no supported card at this address|no\n'
   else
@@ -272,6 +281,11 @@ module_loaded() {
   [ -d "$ROOT/sys/module/gpu_unlock" ]
 }
 
+# card_driver ADDRESS: the driver bound to the card right now (empty when none).
+card_driver() {
+  basename "$(readlink "$SYS_PCI/$1/driver" 2>/dev/null)" 2>/dev/null
+}
+
 # nvidia_cards: one line per NVIDIA display controller: ADDRESS DEVICE DRIVER SUPPORTED
 nvidia_cards() {
   local dev vendor class device drv id supported
@@ -282,7 +296,7 @@ nvidia_cards() {
     class=$(cat "$dev/class" 2>/dev/null)
     case "$class" in 0x0300* | 0x0302*) ;; *) continue ;; esac
     device=$(cat "$dev/device" 2>/dev/null)
-    drv=$(basename "$(readlink "$dev/driver" 2>/dev/null)" 2>/dev/null)
+    drv=$(card_driver "$(basename "$dev")")
     id=${device#0x}
     supported=no
     case " $(printf '%s' "$SUPPORTED_IDS" | tr '\n' ' ') " in *" $id "*) supported=yes ;; esac
@@ -291,14 +305,20 @@ nvidia_cards() {
 }
 
 # kernel_log_lines: what gpu_unlock and the nvidia load logged this boot,
-# including the module's per-card lines that do not carry its name.
+# including the module's per-card lines that do not carry its name. The
+# kernel's ring buffer forgets the boot after enough uptime (container
+# networking alone logs a lot); `report` keeps a copy in /run at boot, which
+# is used once the buffer has no gpu_unlock lines left.
 KERNEL_LOG_RE='gpu[-_]unlock|NVRM: loading|power off first|until power off|Direct firmware load for gpu-unlock'
 kernel_log_lines() {
+  local lines
   if [ -n "$ROOT" ]; then
-    grep -E "$KERNEL_LOG_RE" "$ROOT/var/log/dmesg" 2>/dev/null || true
+    lines=$(grep -E "$KERNEL_LOG_RE" "$ROOT/var/log/dmesg" 2>/dev/null || true)
   else
-    dmesg 2>/dev/null | grep -E "$KERNEL_LOG_RE" || true
+    lines=$(dmesg 2>/dev/null | grep -E "$KERNEL_LOG_RE" || true)
   fi
+  [ -n "$lines" ] || lines=$(cat "$KERNEL_LOG_SNAPSHOT" 2>/dev/null || true)
+  [ -z "$lines" ] || printf '%s\n' "$lines"
 }
 
 # atomic_write FILE MODE  (content on stdin)

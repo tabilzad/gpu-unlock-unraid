@@ -61,7 +61,7 @@ $gu_ready = !empty($gu['module_present']) && !empty($gu['firmware_present']) && 
 <tr><td>Modprobe rule</td><td><?= gu_yesno(!empty($gu['hook_installed']), 'installed', 'not installed') ?><?php if (($gu['hook_conflict'] ?? '') !== ''): ?> <span class="gu-bad">conflict: <?= gu_h($gu['hook_conflict']) ?></span><?php endif; ?></td></tr>
 <tr><td>Targets</td><td><?php if ($gu_targets === ''): ?><span class="gu-bad">none chosen</span><?php else: ?><code><?= gu_h($gu_targets) ?></code> (<?= $gu_source === 'cmdline' ? 'kernel command line, overrides the choice below' : 'chosen below' ?>)<?php endif; ?></td></tr>
 <tr><td>Enabled</td><td><?= gu_yesno(empty($gu['disabled']), 'yes', 'no (disabled for the next boots)') ?><?php if (!empty($gu['safe_mode'])): ?> <span class="gu-bad">Safe Mode: the hook does nothing</span><?php endif; ?></td></tr>
-<tr><td>This boot</td><td><?= gu_h(($gu['hook_status'] ?? '') !== '' ? $gu['hook_status'] : 'the hook did not run this boot') ?>; gpu_unlock <?= gu_yesno(!empty($gu['module_loaded']), 'loaded', 'not loaded') ?></td></tr>
+<tr><td>This boot</td><td><?php if (($gu['hook_status'] ?? '') !== ''): ?><?= gu_h($gu['hook_status']) ?>; gpu_unlock <?= gu_yesno(!empty($gu['module_loaded']), 'loaded', 'not loaded') ?><?php elseif (!empty($gu['module_loaded'])): ?>gpu_unlock <span class="gu-ok">loaded</span>, but not by the hook (no record of it this boot)<?php else: ?>the hook did not run and gpu_unlock is not loaded: expected until the next boot, when the modprobe rule runs the hook as nvidia loads. Still so after a reboot means nvidia did not load (is the Nvidia-Driver plugin installed?).<?php endif; ?></td></tr>
 <tr><td>Next boot</td><td><?= $gu_ready ? '<span class="gu-ok">ready: power the server off fully, then start it</span>' : '<span class="gu-bad">not ready</span>' ?></td></tr>
 </table>
 
@@ -83,7 +83,7 @@ if ($v === null) {
     echo $gu_hook_ran ? 'not a target' : '';
 } else {
     $state = (string) ($v['state'] ?? '');
-    $class = $state === 'unlocked' ? 'gu-ok' : ($state === 'pending' ? 'gu-warn' : 'gu-bad');
+    $class = $state === 'unlocked' ? 'gu-ok' : (($state === 'pending' || $state === 'skipped') ? 'gu-warn' : 'gu-bad');
     echo '<span class="' . $class . '">' . gu_h($state) . '</span>';
     if (($v['reason'] ?? '') !== '') {
         echo ' (' . gu_h($v['reason']) . ')';

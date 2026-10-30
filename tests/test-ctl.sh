@@ -100,6 +100,7 @@ ctl status >"$out" 2>&1
 assert_rc "status text runs" 0 ctl status
 assert_grep "status text lists the card" '0000:01:00.0  device=0x2208  driver=nvidia  supported=yes' "$out"
 assert_grep "status text shows the staged kernel" 'staged kernel:  6.18.70-Unraid' "$out"
+assert_grep "status text: a missing hook record is explained" 'expected until the next boot' "$out"
 
 echo "ctl: enable/disable"
 assert_rc "disable" 0 ctl disable
@@ -190,6 +191,32 @@ printf 'skipped: no cards chosen\n' >"$ROOT/run/gpu-unlock/hook.status"
 rm -f "$ROOT/run/gpu-unlock/notified-report"
 ctl report >/dev/null
 assert "report: silent when the hook did not load" test ! -s "$ROOT/notify.log"
+
+echo "ctl: a card held by another driver, and verdicts once the ring buffer forgot the boot"
+fake_card 0000:04:00.0 0x2206 vfio-pci
+ctl targets set all >/dev/null
+printf 'loaded: gpu_unlock for 6.18.58-Unraid\n' >"$ROOT/run/gpu-unlock/hook.status"
+cat >"$ROOT/var/log/dmesg" <<'EOF2'
+[   41.201337] pci 0000:01:00.0: gpu_unlock: unlocked
+[   41.201400] pci 0000:03:00.0: gpu_unlock: unlocked
+[   41.201500] pci 0000:04:00.0: gpu_unlock: unlock failed (-16)
+EOF2
+ctl status --json >"$out"
+assert "json: a driver-bound card is skipped, not failed" check_json 'any(v["address"] == "0000:04:00.0" and v["state"] == "skipped" and "vfio-pci" in v["reason"] and v["power_off"] is False for v in d["verdicts"])'
+: >"$ROOT/notify.log"
+rm -f "$ROOT/run/gpu-unlock/notified-report" "$ROOT/run/gpu-unlock/kernel.log"
+ctl report >/dev/null
+assert_grep "report: the skipped card does not spoil the success notification" '2 card(s) unlocked' "$ROOT/notify.log"
+assert_not_grep "report: no failure warning for the skipped card" 'failed to unlock' "$ROOT/notify.log"
+assert "report: kernel log lines kept in /run" test -s "$ROOT/run/gpu-unlock/kernel.log"
+: >"$ROOT/var/log/dmesg"
+ctl status --json >"$out"
+assert "json: verdicts survive an empty ring buffer" check_json 'any(v["address"] == "0000:01:00.0" and v["state"] == "unlocked" for v in d["verdicts"])'
+assert "json: the kernel log comes from the kept copy" check_json 'any("gpu_unlock: unlocked" in l for l in d["kernel_log"])'
+printf '[   41.201500] pci 0000:03:00.0: gpu_unlock: unlock failed (-16)\n' >"$ROOT/var/log/dmesg"
+ctl status --json >"$out"
+assert "json: -16 on a card without a driver stays a failure" check_json 'any(v["address"] == "0000:03:00.0" and v["state"] == "failed" and v["reason"] == "unlock failed (-16)" for v in d["verdicts"])'
+rm -rf "$ROOT/sys/bus/pci/devices/0000:04:00.0" "$ROOT/run/gpu-unlock/kernel.log"
 ctl targets set 0000:01:00.0 >/dev/null
 printf '[    5.0] pci 0000:01:00.0: gpu_unlock: unlocked\n[    6.0] NVRM: loading NVIDIA UNIX Open Kernel Module\n' >"$ROOT/var/log/dmesg"
 set_cmdline gpu_unlock.targets=0000:01:00.0
