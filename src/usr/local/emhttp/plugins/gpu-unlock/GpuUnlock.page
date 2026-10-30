@@ -20,6 +20,7 @@ $gu_log = is_array($gu['kernel_log'] ?? null) ? $gu['kernel_log'] : [];
 $gu_fwlog = is_array($gu['firmware_log'] ?? null) ? $gu['firmware_log'] : [];
 $gu_targets = (string) ($gu['targets'] ?? '');
 $gu_source = (string) ($gu['targets_source'] ?? 'none');
+$gu_fw = (string) ($gu['firmware_state'] ?? (!empty($gu['firmware_present']) ? 'present' : 'missing'));
 $gu_selected = $gu_targets === '' ? [] : explode(',', $gu_targets);
 $gu_verdicts = [];
 foreach (is_array($gu['verdicts'] ?? null) ? $gu['verdicts'] : [] as $v) {
@@ -57,7 +58,7 @@ $gu_ready = !empty($gu['module_present']) && !empty($gu['firmware_present']) && 
 <?php if (($gu['pending_kernel'] ?? '') !== ''): ?>
 <tr><td>Staged kernel</td><td><?= gu_h($gu['pending_kernel']) ?> (the next boot runs it) &mdash; module on the flash drive: <?= gu_yesno(!empty($gu['pending_module_present'])) ?></td></tr>
 <?php endif; ?>
-<tr><td>Firmware</td><td><?= gu_yesno(!empty($gu['firmware_present']), 'generated', 'not generated yet') ?><?php if (!empty($gu['firmware_job'])): ?> <span class="gu-ok">(generation running, this page refreshes)</span><?php endif; ?></td></tr>
+<tr><td>Firmware</td><td><?php if ($gu_fw === 'present'): ?><?= gu_yesno(true, 'generated') ?><?php elseif ($gu_fw === 'missing'): ?><?= gu_yesno(false, '', 'not generated yet') ?><?php else: ?><?= gu_yesno(false, '', $gu_fw . ': generate it again') ?><?php if ($gu_fw === 'incomplete'): ?> (it lacks files gpu_unlock <?= gu_h($gu['module_version'] ?? '') ?> loads; cards whose files are there are still unlocked at boot)<?php endif; ?><?php endif; ?><?php if (!empty($gu['firmware_job'])): ?> <span class="gu-ok">(generation running, this page refreshes)</span><?php endif; ?></td></tr>
 <tr><td>Modprobe rule</td><td><?= gu_yesno(!empty($gu['hook_installed']), 'installed', 'not installed') ?><?php if (($gu['hook_conflict'] ?? '') !== ''): ?> <span class="gu-bad">conflict: <?= gu_h($gu['hook_conflict']) ?></span><?php endif; ?></td></tr>
 <tr><td>Targets</td><td><?php if ($gu_targets === ''): ?><span class="gu-bad">none chosen</span><?php else: ?><code><?= gu_h($gu_targets) ?></code> (<?= $gu_source === 'cmdline' ? 'kernel command line, overrides the choice below' : 'chosen below' ?>)<?php endif; ?></td></tr>
 <tr><td>Enabled</td><td><?= gu_yesno(empty($gu['disabled']), 'yes', 'no (disabled for the next boots)') ?><?php if (!empty($gu['safe_mode'])): ?> <span class="gu-bad">Safe Mode: the hook does nothing</span><?php endif; ?></td></tr>
@@ -116,7 +117,7 @@ if ($v === null) {
 <?php endif; ?></p>
 
 <div class="gu-buttons">
-<input type="button" value="Generate firmware (Docker)" onclick="guAction('firmware')" title="Builds a small image with upstream's generators and runs it: downloads about 340 MB from NVIDIA and CachyOS, checks every file, writes the firmware to the flash drive. Needs the Docker service.">
+<input type="button" value="Generate firmware (Docker)" onclick="guAction('firmware')" title="Builds a small image with upstream's generators and runs it: downloads about 370 MB from NVIDIA (the driver installer and the kernel module source, both checked against pinned checksums), generates the firmware files and writes them to the flash drive. Needs the Docker service.">
 <input type="button" value="Fetch module" onclick="guAction('fetch')" title="Download the module built for the running kernel from the GitHub release.">
 <?php if (($gu['pending_kernel'] ?? '') !== ''): ?>
 <input type="button" value="Fetch module for the staged kernel" onclick="guAction('fetch-pending')">

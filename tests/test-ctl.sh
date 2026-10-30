@@ -41,7 +41,7 @@ fake_release 6.18.58-Unraid
 assert_rc "fetch the running kernel's module" 0 ctl fetch
 assert "module on the flash drive" test -s "$FLASH/modules/6.18.58-Unraid/gpu_unlock.ko"
 assert "SHA256SUMS verifies" bash -c "cd '$FLASH/modules/6.18.58-Unraid' && sha256sum -c SHA256SUMS > /dev/null"
-assert_grep "manifest carries the module version" '^module_version=1.0.0$' "$FLASH/modules/6.18.58-Unraid/manifest.txt"
+assert_grep "manifest carries the module version" "^module_version=$MV\$" "$FLASH/modules/6.18.58-Unraid/manifest.txt"
 assert_grep "manifest carries the source" '^source=file://' "$FLASH/modules/6.18.58-Unraid/manifest.txt"
 ctl fetch >"$out" 2>&1
 assert_grep "second fetch is a no-op" 'already on the flash drive' "$out"
@@ -55,7 +55,7 @@ assert_rc "fetch rejects a non-Unraid version" 1 ctl fetch 6.18.61
 printf 'module_version=0.9.0\n' >"$FLASH/modules/6.18.58-Unraid/manifest.txt"
 (cd "$FLASH/modules/6.18.58-Unraid" && sha256sum gpu_unlock.ko manifest.txt >SHA256SUMS)
 ctl fetch >"$out" 2>&1
-assert_grep "an older module version is replaced" 'installed module 1.0.0' "$out"
+assert_grep "an older module version is replaced" "installed module $MV" "$out"
 
 echo "ctl: check"
 fake_release 6.18.60-Unraid
@@ -117,6 +117,33 @@ assert "imported firmware verifies" bash -c "cd '$FLASH/firmware' && sha256sum -
 rm -f "$ROOT/elsewhere/gpu-unlock/610.43.03/gsp_ga10x.bin"
 assert_rc "firmware import refuses an incomplete set" 1 ctl firmware import "$ROOT/elsewhere"
 assert "incomplete import left the old firmware alone" test -s "$FLASH/firmware/gpu-unlock/610.43.03/gsp_ga10x.bin"
+
+echo "ctl: firmware generated for an earlier gpu_unlock, and damaged firmware"
+fake_firmware "$FLASH/firmware" old
+rm -f "$ROOT/run/gpu-unlock/notified-firmware"
+: >"$ROOT/notify.log"
+ctl check >"$out" 2>&1
+assert_grep "check: the five-file set is incomplete" 'firmware 610.43.03: incomplete (generate it again' "$out"
+assert_grep "check: notified to generate again" 'generate the firmware again' "$ROOT/notify.log"
+ctl status --json >"$out"
+assert "json: firmware_state incomplete" check_json 'd["firmware_state"] == "incomplete" and d["firmware_present"] is False'
+ctl status >"$out" 2>&1
+assert_grep "status text: incomplete firmware" 'INCOMPLETE (generated for an earlier gpu_unlock' "$out"
+"$ROOT/usr/local/emhttp/plugins/gpu-unlock/scripts/post-install" >"$out" 2>&1
+assert_grep "post-install summary: incomplete firmware" 'firmware 610.43.03: incomplete, generate it again' "$out"
+fake_firmware "$ROOT/elsewhere" old
+ctl firmware import "$ROOT/elsewhere" >"$out" 2>&1
+assert_rc "firmware import refuses the five-file set" 1 ctl firmware import "$ROOT/elsewhere"
+assert_grep "firmware import names a missing file" 'gsp_tu10x.bin' "$out"
+fake_firmware "$FLASH/firmware"
+head -c 10 /dev/urandom >>"$FLASH/firmware/gpu-unlock/610.43.03/gsp_tu10x.bin"
+ctl status --json >"$out"
+assert "json: firmware_state damaged" check_json 'd["firmware_state"] == "damaged" and d["firmware_present"] is False'
+ctl check >"$out" 2>&1
+assert_grep "check: damaged firmware reported" 'firmware 610.43.03: damaged' "$out"
+fake_firmware "$FLASH/firmware"
+ctl check >"$out" 2>&1
+assert_grep "check: the full set is present" 'firmware 610.43.03: present' "$out"
 
 echo "ctl: targets"
 set_cmdline
@@ -224,7 +251,7 @@ set_cmdline gpu_unlock.targets=0000:01:00.0
 echo "post-install and remove"
 "$ROOT/usr/local/emhttp/plugins/gpu-unlock/scripts/post-install" >"$out" 2>&1
 assert_rc "post-install exits 0" 0 "$ROOT/usr/local/emhttp/plugins/gpu-unlock/scripts/post-install"
-assert_grep "post-install summary: module" 'module 1.0.0 for 6.18.58-Unraid: on the flash drive' "$out"
+assert_grep "post-install summary: module" "module $MV for 6.18.58-Unraid: on the flash drive" "$out"
 assert_grep "post-install summary: firmware" 'firmware 610.43.03: on the flash drive' "$out"
 assert_grep "post-install summary: targets" 'targets: 0000:01:00.0' "$out"
 "$ROOT/usr/local/emhttp/plugins/gpu-unlock/scripts/remove" >"$out" 2>&1

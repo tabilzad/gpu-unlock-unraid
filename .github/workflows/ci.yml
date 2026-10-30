@@ -39,17 +39,23 @@ jobs:
 
       - name: Pinned NVIDIA inputs (cached between runs)
         id: nv
-        run: echo "nv=$(sed -n 's/^NV=//p' versions.env)" >> "$GITHUB_OUTPUT"
+        run: |
+          {
+            echo "nv=$(sed -n 's/^NV=//p' versions.env)"
+            # The cache follows the pinned checksums: new inputs, new cache.
+            echo "key=$(sed -n 's/^NV_INSTALLER_SHA256=//p' versions.env | cut -c1-12)-$(sed -n 's/^NV_SOURCE_SHA256=//p' versions.env | cut -c1-12)"
+            echo "files=$(sed -n 's/^FIRMWARE_FILES=//p' versions.env | wc -w)"
+          } >> "$GITHUB_OUTPUT"
       - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: .inputs
-          key: nvidia-inputs-${{ steps.nv.outputs.nv }}
+          key: nvidia-inputs-${{ steps.nv.outputs.key }}
 
       - name: Build the generator image and generate the firmware
         run: |
           set -euo pipefail
           make firmware-gen
-          test "$(find dist/firmware/gpu-unlock -type f -name '*.bin' | wc -l)" -eq 5
+          test "$(find dist/firmware/gpu-unlock -type f -name '*.bin' | wc -l)" -eq "${{ steps.nv.outputs.files }}"
           test "$(cat dist/firmware/VERSION)" = "${{ steps.nv.outputs.nv }}"
           ls -la dist/firmware/gpu-unlock/*/
           # The generated firmware is NVIDIA's and stays here: nothing is uploaded.

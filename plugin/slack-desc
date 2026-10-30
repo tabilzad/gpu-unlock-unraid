@@ -10,9 +10,9 @@ gpu-unlock: gpu-unlock (GPU Unlock for Unraid)
 gpu-unlock:
 gpu-unlock: Unraid plugin that loads the gpu_unlock kernel module from
 gpu-unlock: Zagitta/gpu-unlock right before the NVIDIA driver at boot, so that
-gpu-unlock: RTX 30 series cards chosen on its settings page run FP16 and
-gpu-unlock: BF16 at full rate. Fetches the module built for the running Unraid
-gpu-unlock: kernel from GitHub and generates the firmware locally with Docker.
+gpu-unlock: RTX 30 series cards (and, experimentally, RTX 20 and 40) chosen on
+gpu-unlock: its settings page run FP16 and BF16 at full rate. Fetches the module
+gpu-unlock: built for the running kernel from GitHub; firmware made locally.
 gpu-unlock:
 gpu-unlock: GPL-2.0-only. Not affiliated with NVIDIA or Lime Technology.
 gpu-unlock:

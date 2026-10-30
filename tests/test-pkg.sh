@@ -44,12 +44,22 @@ assert "render-plg wrote the plg" test -s "$plg"
 assert_rc "xmllint accepts it" 0 xmllint --noent --noout "$plg"
 assert_rc "lint-plg accepts it" 0 "$REPO/scripts/lint-plg" "$plg"
 assert_grep "plg carries the package sha256" "$(cut -d' ' -f1 "$txz.sha256")" "$plg"
-assert_grep "plg carries the module version" '<!ENTITY moduleVersion "1.0.0">' "$plg"
+assert_grep "plg carries the module version" "<!ENTITY moduleVersion \"$MV\">" "$plg"
 assert_grep "plg points at the release URL" 'releases/download/v0.0.0-dev/gpu-unlock-0000.00.00.0_dev-noarch-1.txz' "$plg"
 sed 's/<SHA256>/<MD5>/; s/<\/SHA256>/<\/MD5>/' "$plg" >"$tmp/bad.plg"
 assert_rc "lint-plg rejects MD5" 1 "$REPO/scripts/lint-plg" "$tmp/bad.plg"
 sed 's|"https://github.com/tabilzad/gpu-unlock-unraid/releases/download/|"https://example.com/|' "$plg" >"$tmp/bad2.plg"
 assert_rc "lint-plg rejects a foreign URL" 1 "$REPO/scripts/lint-plg" "$tmp/bad2.plg"
+
+echo "pins: the Dockerfile defaults follow versions.env"
+for key in UPSTREAM_REF NV_INSTALLER_SHA256 NV_SOURCE_SHA256; do
+  assert "firmware Dockerfile default $key" grep -qx "ARG $key=$(sed -n "s/^$key=//p" "$REPO/versions.env")" "$REPO/src/usr/local/emhttp/plugins/gpu-unlock/docker/Dockerfile"
+done
+for key in UPSTREAM_REF MODULE_VERSION; do
+  assert "module Dockerfile default $key" grep -qx "ARG $key=$(sed -n "s/^$key=//p" "$REPO/versions.env")" "$REPO/docker/module.Dockerfile"
+done
+assert "FIRMWARE_FILES names .bin files only" test -z "$(printf '%s' "$FW_FILES" | tr ' ' '\n' | grep -v '\.bin$')"
+assert "FIRMWARE_FILES has no duplicate" test "$(printf '%s' "$FW_FILES" | tr ' ' '\n' | sort | uniq -d | wc -l)" = 0
 
 rm -rf "$tmp"
 finish

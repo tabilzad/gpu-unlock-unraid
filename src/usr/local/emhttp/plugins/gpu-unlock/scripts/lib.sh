@@ -67,13 +67,26 @@ MODULE_VERSION=$(env_get MODULE_VERSION)
 NV=$(env_get NV)
 UPSTREAM_REPO=$(env_get UPSTREAM_REPO)
 UPSTREAM_REF=$(env_get UPSTREAM_REF)
-# Device ids the module accepts (supported_ids in upstream main.c at UPSTREAM_REF).
-SUPPORTED_IDS="2200 2203 2204 2205 2206 2207 2208 220a 220d 2216 222b 222f
+# The files the module loads from gpu-unlock/$NV/ (FIRMWARE_FILES in upstream's
+# Makefile at UPSTREAM_REF); a set that lacks any of them counts as incomplete.
+FIRMWARE_FILES=$(env_get FIRMWARE_FILES)
+# Device ids the module accepts (cards[] in upstream kernel/gpu_unlock/recipes.c
+# at UPSTREAM_REF), one family per line: TU102, TU104, TU106 (Turing), GA102,
+# GA103, GA104, GA106 (Ampere), AD102, AD103, AD104, AD106, AD107 (Ada Lovelace).
+# Upstream marks Turing and Ada experimental.
+SUPPORTED_IDS="1e03 1e04 1e07 1e2d 1e2e
+1e81 1e82 1e84 1e87 1e89 1ec2 1ec7
+1f02 1f03 1f06 1f07 1f08 1f42 1f47
+2200 2203 2204 2205 2206 2207 2208 220a 220d 2216 222b 222f
+2414
 2480 2482 2483 2484 2486 2487 2488 2489 248a 248c 248d 248e 249c 249d 249f 24a0
 24a4 24ac 24ad 24af 24bf 24c0 24c7 24c8 24c9 24dc 24dd 24df 24e0
-2414
 2501 2503 2504 2505 2507 2508 2509 252f 2544
-2520 2560"
+2684 2685 2689
+2702 2704 2705 2709 2757
+2782 2783 2786
+2803 2805
+2882 28a0 28e0 28e1"
 
 # ---------------------------------------------------------------------------
 # Logging and notifications
@@ -157,10 +170,31 @@ module_ok() {
   [ "$(sed -n 's/^module_version=//p' "$dir/manifest.txt" 2>/dev/null)" = "$MODULE_VERSION" ]
 }
 
+# firmware_missing [DIR]: the files the module loads that DIR (default: the
+# flash drive) lacks, one per line; nothing when the set is complete.
+firmware_missing() {
+  local dir=${1:-$FIRMWARE_DIR} f
+  for f in $FIRMWARE_FILES; do
+    [ -s "$dir/gpu-unlock/$NV/$f" ] || echo "$f"
+  done
+}
+
+# firmware_state: present, missing, incomplete (a set that lacks files, as one
+# generated for an earlier gpu_unlock does) or damaged (checksums fail).
+firmware_state() {
+  if [ ! -d "$FIRMWARE_DIR/gpu-unlock/$NV" ] && [ ! -r "$FIRMWARE_DIR/SHA256SUMS" ]; then
+    echo missing
+  elif [ -n "$(firmware_missing)" ] || [ "$(cat "$FIRMWARE_DIR/VERSION" 2>/dev/null)" != "$NV" ]; then
+    echo incomplete
+  elif [ ! -r "$FIRMWARE_DIR/SHA256SUMS" ] || ! (cd "$FIRMWARE_DIR" && sha256sum -c SHA256SUMS >/dev/null 2>&1); then
+    echo damaged
+  else
+    echo present
+  fi
+}
+
 firmware_ok() {
-  [ -r "$FIRMWARE_DIR/SHA256SUMS" ] && [ -d "$FIRMWARE_DIR/gpu-unlock/$NV" ] || return 1
-  [ "$(cat "$FIRMWARE_DIR/VERSION" 2>/dev/null)" = "$NV" ] || return 1
-  (cd "$FIRMWARE_DIR" && sha256sum -c SHA256SUMS >/dev/null 2>&1)
+  [ "$(firmware_state)" = present ]
 }
 
 hook_installed() {

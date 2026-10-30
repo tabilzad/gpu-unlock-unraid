@@ -80,6 +80,8 @@ firmware-gen:
 	docker build --pull -t $(PLUGIN)/firmware-gen:dev \
 	  --build-arg "UPSTREAM_REPO=$$(sed -n 's/^UPSTREAM_REPO=//p' versions.env)" \
 	  --build-arg "UPSTREAM_REF=$$(sed -n 's/^UPSTREAM_REF=//p' versions.env)" \
+	  --build-arg "NV_INSTALLER_SHA256=$$(sed -n 's/^NV_INSTALLER_SHA256=//p' versions.env)" \
+	  --build-arg "NV_SOURCE_SHA256=$$(sed -n 's/^NV_SOURCE_SHA256=//p' versions.env)" \
 	  $(PLUGIN_DIR)/docker
 	mkdir -p .inputs dist/firmware
 	MSYS_NO_PATHCONV=1 docker run --rm -v "$$(pwd)/.inputs:/cache" -v "$$(pwd)/dist/firmware:/out" $(PLUGIN)/firmware-gen:dev

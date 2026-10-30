@@ -2,18 +2,21 @@
 
 An Unraid plugin that runs [Zagitta/gpu-unlock](https://github.com/Zagitta/gpu-unlock)
 at boot: the `gpu_unlock` kernel module unlocks the full FP16/BF16 tensor rate
-of GeForce RTX 30 series cards (GA102, GA103, GA104, GA106: RTX 3090, 3080 Ti,
-3080, 3070, 3060 ...) before the NVIDIA driver binds them. The driver itself is
-not patched.
+of GeForce RTX 30 series cards (Ampere: RTX 3090, 3080 Ti, 3080, 3070, 3060 ...)
+before the NVIDIA driver binds them, and, experimentally as upstream marks it,
+of RTX 20 (Turing) and RTX 40 (Ada Lovelace) cards. The driver itself is not
+patched.
 
-Status: **0.2.x**. Confirmed on real hardware by a user in
-[#1](https://github.com/tabilzad/gpu-unlock-unraid/issues/1): Unraid 7.3.4
-(kernel 6.18.58) with an RTX 3090, and a second server with an RTX 3060
-(GA104), both unlocked at the first power cycle. An Unraid update that was
-already staged on the flash drive at install time had its module fetched in
+Status: **0.3.x**, gpu_unlock 2.0.0. Confirmed on real hardware with gpu_unlock
+1.0.0 by a user in [#1](https://github.com/tabilzad/gpu-unlock-unraid/issues/1):
+Unraid 7.3.4 (kernel 6.18.58) with an RTX 3090, and a second server with an
+RTX 3060 (GA104), both unlocked at the first power cycle. An Unraid update that
+was already staged on the flash drive at install time had its module fetched in
 advance, and the unlock carried over the reboot. The mechanism is the one
 reported working in [gpu-unlock#55](https://github.com/Zagitta/gpu-unlock/issues/55).
-Please report what happens on yours.
+2.0.0 is the same unlock for Ampere, with the firmware now taken from NVIDIA's
+driver installer; Turing and Ada are new and unconfirmed here. Please report
+what happens on yours.
 
 > Not affiliated with NVIDIA, Lime Technology or the gpu-unlock authors.
 > Everything here is GPL-2.0-only. No NVIDIA file is redistributed: the
@@ -41,7 +44,7 @@ drive ready for that moment:
 | piece | where it comes from | where it lives |
 | --- | --- | --- |
 | `gpu_unlock.ko` for your exact kernel | [releases named after the kernel](https://github.com/tabilzad/gpu-unlock-unraid/releases), built by CI from upstream against [ich777's prepared trees](https://github.com/ich777/unraid_kernel/releases) | `/boot/config/plugins/gpu-unlock/modules/<kernel>/` |
-| firmware (five files, about 85 MB) | generated on your server with Docker by upstream's generators | `/boot/config/plugins/gpu-unlock/firmware/` |
+| firmware (16 files, about 110 MB) | generated on your server with Docker by upstream's generators | `/boot/config/plugins/gpu-unlock/firmware/` |
 | the hook and the modprobe rule | the plugin package | `/boot/config/plugins/gpu-unlock/pre-nvidia.sh`, `/boot/config/modprobe.d/gpu-unlock.conf` |
 | the cards to unlock | the settings page (or the kernel command line) | `/boot/config/plugins/gpu-unlock/targets` |
 
@@ -62,9 +65,10 @@ The per-card verdicts and the card selection on the page follow their lead.
 - A supported card and the Nvidia-Driver plugin: the hook runs when the
   `nvidia` module loads, so without the driver nothing triggers the unlock
   (and nothing would use the unlocked rate).
-- Docker enabled, once, to generate the firmware (about 340 MB downloaded from
-  download.nvidia.com and archive.cachyos.org, every file checksummed).
-- About 90 MB free on the flash drive.
+- Docker enabled, once, to generate the firmware (about 370 MB downloaded from
+  download.nvidia.com: the driver installer and the kernel module source, each
+  checked against a SHA-256 pinned in `versions.env`).
+- About 120 MB free on the flash drive.
 
 ## Install
 
@@ -115,7 +119,11 @@ you get a warning once per boot.
 A new upstream gpu-unlock version is a plugin update: `versions.env` pins the
 upstream commit, the Modules workflow rebuilds every kernel for the new
 version (`force`), and the plugin replaces the module on the flash drive when
-the pinned version changes.
+the pinned version changes. When the new version loads more firmware files
+than the set on the flash drive holds, the page, `status` and `check` report
+the firmware as incomplete and ask you to generate it again; the hook still
+stages the old set meanwhile, so the cards whose files are there stay
+unlocked.
 
 ## Disable, remove, recover
 

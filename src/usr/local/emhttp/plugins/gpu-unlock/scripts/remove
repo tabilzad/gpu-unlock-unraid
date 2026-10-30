@@ -38,7 +38,7 @@ boot. Remove gpu_unlock.targets= from the boot entry (Main, Flash, Syslinux
 Configuration) too.
 
 Kept, because they are yours:
-  ${FIRMWARE_DIR#"$ROOT"}   the generated firmware (about 85 MB)
+  ${FIRMWARE_DIR#"$ROOT"}   the generated firmware (about 110 MB)
   ${CFG_FILE#"$ROOT"}       settings
 To remove them too:  rm -rf ${FLASH_DIR#"$ROOT"}
 EOF

@@ -23,6 +23,23 @@ All notable changes to the GPU Unlock plugin for Unraid. The format follows
 
 ### Changed
 
+- gpu_unlock 2.0.0 (Zagitta/gpu-unlock at 0532473, "Release 2.0") replaces
+  1.0.0. The module now also accepts Turing (RTX 20) and Ada Lovelace
+  (RTX 40) cards, which upstream marks experimental: 87 device ids in all.
+  Two GA106 laptop ids that 1.0.0 accepted (10de:2520, 10de:2560) are not in
+  2.0.0's table. Every kernel's module is rebuilt; the kernel releases gain
+  `gpu_unlock-2.0.0-<kernel>.ko` next to the 1.0.0 build that installed
+  0.2.x plugins keep using.
+- The firmware set grows from five files to sixteen, all taken from NVIDIA's
+  driver installer and kernel module source (the CachyOS package is no
+  longer an input; the `v67` payload now lives in the module). The
+  generator checks both downloads against a SHA-256 pinned in
+  `versions.env`, since upstream's fetcher stopped checking them, and
+  refuses an output set that lacks any file the module loads.
+- Firmware generated for 1.0.0 is reported as "incomplete" by `check`,
+  `status` and the page, with a notification asking to generate it again.
+  The boot hook still stages it, so Ampere cards stay unlocked meanwhile;
+  Turing and Ada cards need the new set.
 - `status` and the page explain that no hook record and gpu_unlock not
   loaded are expected until the first boot after the install, and what it
   means if it stays so after a reboot (reported in #1).

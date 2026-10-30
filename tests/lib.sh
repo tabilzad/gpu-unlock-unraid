@@ -7,6 +7,10 @@
 # shellcheck disable=SC2034 # sourced library
 
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+# The pins the scripts under test read from gpu-unlock.env (a copy of versions.env).
+MV=$(sed -n 's/^MODULE_VERSION=//p' "$REPO/versions.env")
+NV=$(sed -n 's/^NV=//p' "$REPO/versions.env")
+FW_FILES=$(sed -n 's/^FIRMWARE_FILES=//p' "$REPO/versions.env")
 T_FAILS=0
 T_COUNT=0
 
@@ -93,28 +97,32 @@ fake_bzimage() {
 fake_release() {
   local base="$ROOT/releases" dir name
   dir="$base/$1"
-  name="gpu_unlock-1.0.0-$1"
+  name="gpu_unlock-$MV-$1"
   mkdir -p "$dir"
-  if [ -s "$REPO/dist/modules/gpu_unlock-1.0.0-$1.ko" ]; then
-    cp "$REPO/dist/modules/gpu_unlock-1.0.0-$1.ko" "$dir/$name.ko"
+  if [ -s "$REPO/dist/modules/$name.ko" ]; then
+    cp "$REPO/dist/modules/$name.ko" "$dir/$name.ko"
   else
     printf 'not a real module for %s\n' "$1" >"$dir/$name.ko"
   fi
   (cd "$dir" && sha256sum "$name.ko" >"$name.ko.sha256")
   [ "${2:-}" != bad ] || sed -i 's/^./0/' "$dir/$name.ko.sha256"
-  printf 'kernel=%s\nmodule_version=1.0.0\n' "$1" >"$dir/$name.manifest.txt"
+  printf 'kernel=%s\nmodule_version=%s\n' "$1" "$MV" >"$dir/$name.manifest.txt"
   mkdir -p "$ROOT/boot/config/plugins/gpu-unlock"
   printf 'RELEASE_BASE="file://%s"\n' "$base" >"$ROOT/boot/config/plugins/gpu-unlock/gpu-unlock.cfg"
 }
 
-# fake_firmware DIR: five random files laid out like the generator's output.
+# fake_firmware DIR [old]: random files laid out like the generator's output,
+# the set versions.env lists; "old" makes the five-file set gpu_unlock 1.0.0
+# loaded, as a flash drive from an earlier plugin carries it.
 fake_firmware() {
-  local dir=$1 f
-  mkdir -p "$dir/gpu-unlock/610.43.03"
-  for f in booter_load_ga102.bin gsp_ga10x.bin gsp_boot_ga102.bin gsp_boot_desc_ga102.bin v67-ga102-610.43.03.bin; do
-    head -c 256 /dev/urandom >"$dir/gpu-unlock/610.43.03/$f"
+  local dir=$1 f files=$FW_FILES
+  [ "${2:-}" != old ] || files="booter_load_ga102.bin gsp_ga10x.bin gsp_boot_ga102.bin gsp_boot_desc_ga102.bin v67-ga102-610.43.03.bin"
+  rm -rf "$dir/gpu-unlock"
+  mkdir -p "$dir/gpu-unlock/$NV"
+  for f in $files; do
+    head -c 256 /dev/urandom >"$dir/gpu-unlock/$NV/$f"
   done
-  echo 610.43.03 >"$dir/VERSION"
+  echo "$NV" >"$dir/VERSION"
   # shellcheck disable=SC2094 # SHA256SUMS is excluded from the listing
   (cd "$dir" && find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum >SHA256SUMS)
 }

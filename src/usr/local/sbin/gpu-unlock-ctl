@@ -100,7 +100,7 @@ fetch_module() {
 # ---------------------------------------------------------------------------
 
 check_cmd() {
-  local quiet=0 running pending k problems=0 fetched
+  local quiet=0 running pending k problems=0 fetched fw
   [ "${1:-}" = --quiet ] && quiet=1
   running=$(running_kernel)
   pending=$(pending_kernel || true)
@@ -125,16 +125,36 @@ check_cmd() {
         "The module for $k could not be fetched, so the unlock does not run on that kernel: either no gpu_unlock $MODULE_VERSION build is published for it yet (builds appear at $RELEASES_PAGE within a day of a new Unraid release) or the download failed, for example without network early in the boot. Click Check now in Settings, User Utilities, GPU Unlock, or run gpu-unlock-ctl check, to try again."
     fi
   done
-  if ! firmware_ok; then
-    problems=1
-    [ "$quiet" = 1 ] || echo "firmware $NV: missing (gpu-unlock-ctl firmware)"
-    if hook_installed; then
-      notify_once firmware warning "GPU Unlock: firmware not generated yet" \
-        "The unlock cannot run without the locally generated firmware. Open Settings, User Utilities, GPU Unlock and click Generate firmware (needs the Docker service), or run gpu-unlock-ctl firmware."
-    fi
-  else
-    [ "$quiet" = 1 ] || echo "firmware $NV: present"
-  fi
+  fw=$(firmware_state)
+  case "$fw" in
+    present) [ "$quiet" = 1 ] || echo "firmware $NV: present" ;;
+    missing)
+      problems=1
+      [ "$quiet" = 1 ] || echo "firmware $NV: missing (gpu-unlock-ctl firmware)"
+      if hook_installed; then
+        notify_once firmware warning "GPU Unlock: firmware not generated yet" \
+          "The unlock cannot run without the locally generated firmware. Open Settings, User Utilities, GPU Unlock and click Generate firmware (needs the Docker service), or run gpu-unlock-ctl firmware."
+      fi
+      ;;
+    incomplete)
+      # A set generated for an earlier gpu_unlock: the hook still stages it,
+      # so the cards whose files are there stay unlocked meanwhile.
+      problems=1
+      [ "$quiet" = 1 ] || echo "firmware $NV: incomplete (generate it again: gpu-unlock-ctl firmware)"
+      if hook_installed; then
+        notify_once firmware warning "GPU Unlock: generate the firmware again" \
+          "The firmware on the flash drive lacks files that gpu_unlock $MODULE_VERSION loads (it was generated for an earlier version): cards whose files are there are still unlocked at boot, the others fail with firmware load failed (-2). Open Settings, User Utilities, GPU Unlock and click Generate firmware (needs the Docker service), or run gpu-unlock-ctl firmware."
+      fi
+      ;;
+    *)
+      problems=1
+      [ "$quiet" = 1 ] || echo "firmware $NV: damaged (generate it again: gpu-unlock-ctl firmware)"
+      if hook_installed; then
+        notify_once firmware warning "GPU Unlock: generate the firmware again" \
+          "The firmware on the flash drive fails its checksums, so the boot hook skips it and nothing is unlocked. Open Settings, User Utilities, GPU Unlock and click Generate firmware (needs the Docker service), or run gpu-unlock-ctl firmware."
+      fi
+      ;;
+  esac
   return "$problems"
 }
 
@@ -165,19 +185,21 @@ firmware_generate() {
     echo "building $image from $EMHTTP_DIR/docker (upstream $UPSTREAM_REPO@${UPSTREAM_REF:0:12})"
     docker build --pull -t "$image" \
       --build-arg "UPSTREAM_REPO=$UPSTREAM_REPO" --build-arg "UPSTREAM_REF=$UPSTREAM_REF" \
+      --build-arg "NV_INSTALLER_SHA256=$(env_get NV_INSTALLER_SHA256)" \
+      --build-arg "NV_SOURCE_SHA256=$(env_get NV_SOURCE_SHA256)" \
       "$EMHTTP_DIR/docker" || die "docker build failed"
   fi
   tmpout="$FLASH_DIR/.firmware.new"
   rm -rf "$tmpout"
   mkdir -p "$tmpout" || die "cannot write to $FLASH_DIR"
-  echo "generating firmware $NV with $image (downloads about 340 MB of NVIDIA inputs)"
+  echo "generating firmware $NV with $image (downloads about 370 MB of NVIDIA inputs, checked against their pinned checksums)"
   if ! docker run --rm -v "$tmpout:/out" ${cache:+-v "$cache:/cache"} "$image"; then
     rm -rf "$tmpout"
     die "firmware generation failed"
   fi
   if ! (cd "$tmpout" && sha256sum -c SHA256SUMS >/dev/null 2>&1) ||
     [ "$(cat "$tmpout/VERSION" 2>/dev/null)" != "$NV" ] ||
-    [ ! -s "$tmpout/gpu-unlock/$NV/gsp_ga10x.bin" ]; then
+    [ -n "$(firmware_missing "$tmpout")" ]; then
     rm -rf "$tmpout"
     die "the generated firmware does not verify; nothing was replaced"
   fi
@@ -189,9 +211,10 @@ firmware_generate() {
 }
 
 firmware_import() {
-  local src=$1 tmpout
+  local src=$1 tmpout missing
   [ -d "$src/gpu-unlock/$NV" ] || die "$src has no gpu-unlock/$NV directory"
-  [ "$(find "$src/gpu-unlock/$NV" -type f -name '*.bin' | wc -l)" -eq 5 ] || die "$src/gpu-unlock/$NV must hold the five firmware files"
+  missing=$(firmware_missing "$src" | tr '\n' ' ')
+  [ -z "$missing" ] || die "$src/gpu-unlock/$NV lacks files gpu_unlock $MODULE_VERSION loads: ${missing% }"
   tmpout="$FLASH_DIR/.firmware.new"
   rm -rf "$tmpout"
   mkdir -p "$tmpout" || die "cannot write to $FLASH_DIR"
@@ -325,6 +348,7 @@ status_json() {
   done
   printf '],'
   printf '"firmware_present":%s,' "$(json_bool firmware_ok)"
+  printf '"firmware_state":%s,' "$(json_str "$(firmware_state)")"
   printf '"firmware_job":%s,' "$(json_bool firmware_job_running)"
   printf '"firmware_log":%s,' "$(tail -n 15 "$FIRMWARE_LOG" 2>/dev/null | json_list)"
   printf '"hook_installed":%s,' "$(json_bool hook_installed)"
@@ -374,7 +398,12 @@ status_text() {
   if [ -n "$pending" ]; then
     echo "staged kernel:  $pending  module: $(module_ok "$pending" && echo present || echo MISSING)"
   fi
-  echo "firmware:       $(firmware_ok && echo present || echo 'MISSING (gpu-unlock-ctl firmware)')"
+  case "$(firmware_state)" in
+    present) echo "firmware:       present" ;;
+    missing) echo "firmware:       MISSING (gpu-unlock-ctl firmware)" ;;
+    incomplete) echo "firmware:       INCOMPLETE (generated for an earlier gpu_unlock; generate it again: gpu-unlock-ctl firmware)" ;;
+    *) echo "firmware:       DAMAGED (generate it again: gpu-unlock-ctl firmware)" ;;
+  esac
   if hook_installed; then echo "modprobe rule:  installed"; else echo "modprobe rule:  NOT installed (gpu-unlock-ctl hook-install)"; fi
   [ -z "$(hook_conflict)" ] || echo "CONFLICT:       $(hook_conflict | tr '\n' ' ')"
   [ ! -e "$DISABLED_MARKER" ] || echo "disabled:       yes (gpu-unlock-ctl enable to undo)"
