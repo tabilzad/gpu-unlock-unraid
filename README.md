@@ -7,7 +7,7 @@ before the NVIDIA driver binds them, and, experimentally as upstream marks it,
 of RTX 20 (Turing) and RTX 40 (Ada Lovelace) cards. The driver itself is not
 patched.
 
-Status: **0.3.x**, gpu_unlock 2.0.0. Confirmed on real hardware with gpu_unlock
+Status: **0.4.x**, gpu_unlock 2.0.0. Confirmed on real hardware with gpu_unlock
 1.0.0 by a user in [#1](https://github.com/tabilzad/gpu-unlock-unraid/issues/1):
 Unraid 7.3.4 (kernel 6.18.58) with an RTX 3090, and a second server with an
 RTX 3060 (GA104), both unlocked at the first power cycle. An Unraid update that
