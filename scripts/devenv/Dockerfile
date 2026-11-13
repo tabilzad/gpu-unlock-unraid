@@ -12,13 +12,14 @@ ARG ACTIONLINT_VERSION=1.7.12
 ARG ACTIONLINT_SHA256=8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
 
 # Tools the plugin scripts also find on Unraid (bash, coreutils, util-linux
-# for flock, kmod for insmod/modinfo, curl, xz), plus xmllint for the plg lint
-# and python3 for JSON checks in the tests. No jq: the box does not have it.
+# for flock, kmod for insmod/modinfo, curl, xz), plus xmllint for the plg lint,
+# python3 for JSON checks in the tests and node for the page script's syntax
+# check. No jq: the box does not have it.
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
       bash ca-certificates curl wget xz-utils libxml2-utils make git \
-      util-linux procps file bsdextrautils python3 kmod; \
+      util-linux procps file bsdextrautils python3 kmod nodejs; \
     rm -rf /var/lib/apt/lists/*
 
 RUN set -eux; \

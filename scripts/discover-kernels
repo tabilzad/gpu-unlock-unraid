@@ -1,0 +1,135 @@
+#!/usr/bin/env bash
+# discover-kernels: the Unraid kernels the Modules workflow builds tonight, as
+# a JSON list on stdout (the workflow writes it to $GITHUB_OUTPUT). Progress
+# and warnings go to stderr.
+#
+#   discover-kernels --repo OWNER/NAME [--kernels 6.18.60-Unraid,...] [--force]
+#
+# Without --kernels the list is the union of
+#   - kernels.txt (the releases kept built by hand),
+#   - the kernel of every current stable Unraid release: releases.unraid.net
+#     lists the releases, and each release note names its kernel ("Linux
+#     kernel: update to 6.18.60-Unraid"), so a new Unraid version is covered
+#     the night it appears, also when its kernel is older than a release
+#     candidate's already built here,
+#   - every kernel ich777 has published a prepared tree for that is newer than
+#     the newest one released here (the release candidates and betas),
+# at or above MIN_KERNEL, minus the kernels whose release here already carries
+# the module of the pinned version (--force keeps them), the newest MAX_NEW of
+# them (a bounded amount of work per night; the rest follows on later nights).
+# With --kernels only that list is taken, uncapped. Needs gh (authenticated),
+# curl and jq.
+set -euo pipefail
+
+REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+readonly REPO_ROOT
+MAX_NEW=6
+UNRAID_FEED=https://releases.unraid.net/json
+KVER_LINE='^[0-9]+\.[0-9]+\.[0-9]+-Unraid$'
+KVER_WORD='[0-9]+\.[0-9]+\.[0-9]+-Unraid'
+
+die() {
+  printf 'discover-kernels: %s\n' "$*" >&2
+  exit 1
+}
+
+repo=""
+input=""
+force=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --repo)
+      repo=${2:-}
+      shift 2
+      ;;
+    --kernels)
+      input=${2:-}
+      shift 2
+      ;;
+    --force)
+      force=1
+      shift
+      ;;
+    *) die "unknown argument '$1'" ;;
+  esac
+done
+[[ "$repo" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || die "--repo OWNER/NAME is required"
+
+mv=$(sed -n 's/^MODULE_VERSION=//p' "$REPO_ROOT/versions.env")
+min=$(sed -n 's/^MIN_KERNEL=//p' "$REPO_ROOT/versions.env")
+[[ "$mv" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "MODULE_VERSION in versions.env is missing or malformed"
+[[ "$min" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "MIN_KERNEL in versions.env is missing or malformed"
+
+# ge A B: version A is B or newer
+ge() { [ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -n1)" = "$2" ]; }
+
+# Blank lines are dropped with sed, never with grep -v: an empty list is the
+# normal "nothing to build" case, and grep -v exits 1 when it prints nothing,
+# which under pipefail would fail the whole run.
+kernels_listed() {
+  sed 's/#.*//' "$REPO_ROOT/kernels.txt" | tr -d ' \t' | grep -E "$KVER_LINE" || true
+}
+
+# The kernel of every current stable Unraid release. A note that names no
+# kernel (a maintenance release that kept the previous one) adds nothing; the
+# feed being unreachable is a warning, not a failure, since kernels.txt and
+# the newest-kernel rule still apply.
+kernels_stable() {
+  local notes url
+  # (tr: jq on Windows ends its lines with CR LF)
+  notes=$(curl -fsSL --retry 3 --proto '=https' "$UNRAID_FEED" |
+    jq -r '.[] | select(.public == true and .published == true and .supportStatus != "eol") | .changelog' | tr -d '\r') || {
+    echo "::warning::could not read $UNRAID_FEED; tonight the stable releases' kernels come from kernels.txt alone" >&2
+    return 0
+  }
+  for url in $notes; do
+    case "$url" in
+      https://releases.unraid.net/*) ;;
+      *) continue ;;
+    esac
+    curl -fsSL --retry 2 --proto '=https' "$url" 2>/dev/null | grep -oE "$KVER_WORD" || true
+  done | sort -uV
+}
+
+# Every published kernel newer than the newest one released here (or listed).
+kernels_newer() {
+  local listed=$1 published ours top k
+  published=$(gh release list -R ich777/unraid_kernel --limit 300 --json tagName -q '.[].tagName' | tr -d '\r' | grep -E "$KVER_LINE" | sort -V)
+  ours=$(gh release list -R "$repo" --limit 300 --json tagName -q '.[].tagName' | tr -d '\r' | grep -E "$KVER_LINE" || true)
+  top=$(printf '%s\n%s\n' "$ours" "$listed" | sed '/^$/d' | sort -V | tail -n1)
+  printf '%s\n' "$published" | while read -r k; do
+    [ -n "$k" ] || continue
+    if [ "$k" = "$top" ] || ! ge "$k" "$top"; then continue; fi
+    printf '%s\n' "$ours" | grep -qx "$k" || echo "$k"
+  done
+}
+
+if [ -n "$input" ]; then
+  list=$(printf '%s' "$input" | tr ',' '\n' | tr -d ' ' | grep -E "$KVER_LINE" || true)
+else
+  listed=$(kernels_listed)
+  stable=$(kernels_stable)
+  echo "stable Unraid releases' kernels: $(printf '%s' "$stable" | tr '\n' ' ')" >&2
+  newer=$(kernels_newer "$listed")
+  list=$(printf '%s\n%s\n%s\n' "$listed" "$stable" "$newer" | sed '/^$/d' | sort -uV | while read -r k; do
+    ge "$k" "$min-Unraid" && echo "$k" || echo "::notice::$k is older than MIN_KERNEL $min, skipped" >&2
+  done)
+fi
+
+if [ "$force" = 0 ]; then
+  list=$(printf '%s\n' "$list" | while read -r k; do
+    [ -n "$k" ] || continue
+    if gh release view "$k" -R "$repo" --json assets -q '.assets[].name' 2>/dev/null | grep -qx "gpu_unlock-$mv-$k.ko"; then
+      echo "::notice::$k already has gpu_unlock-$mv-$k.ko" >&2
+      continue
+    fi
+    echo "$k"
+  done)
+fi
+if [ -z "$input" ]; then
+  list=$(printf '%s\n' "$list" | sed '/^$/d' | sort -V | tail -n "$MAX_NEW")
+fi
+json=$(printf '%s\n' "$list" | sed '/^$/d' | jq -R . | jq -s -c .)
+[ "$json" != '[]' ] || echo "nothing to build: every kernel in scope has its module" >&2
+echo "kernels to build: $json" >&2
+printf '%s\n' "$json"

@@ -1,0 +1,75 @@
+#!/usr/bin/env php
+<?php
+/*
+ * lint-escaping: no .page or PHP file may print a variable into HTML without
+ * escaping it.
+ *
+ *   lint-escaping PATH...
+ *
+ * Flags every `<?= ... ?>`, `echo ...` and `print ...` whose expression
+ * contains a `$variable` and does not start with htmlspecialchars(), gu_h(),
+ * json_encode(), an `(int)` cast, or one of the helpers of include/ui.php
+ * and include/render.php that escape what they are given: gu_badge(),
+ * gu_icon(), gu_button(), gu_step_mark(), gu_render(). Exit 1 on findings.
+ *
+ * Same check as scripts/lint-escaping in tabilzad/claude-code-unraid.
+ */
+declare(strict_types=1);
+
+$paths = array_slice($argv, 1);
+if ($paths === []) {
+    fwrite(STDERR, "usage: lint-escaping PATH...\n");
+    exit(2);
+}
+
+function files(array $paths): array
+{
+    $out = [];
+    foreach ($paths as $p) {
+        if (is_file($p)) {
+            $out[] = $p;
+            continue;
+        }
+        $it = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($p, FilesystemIterator::SKIP_DOTS));
+        foreach ($it as $f) {
+            if (preg_match('/\.(page|php)$/', $f->getFilename())) {
+                $out[] = $f->getPathname();
+            }
+        }
+    }
+    sort($out);
+    return $out;
+}
+
+$safe = '/^\s*(htmlspecialchars|gu_h|gu_badge|gu_icon|gu_button|gu_step_mark|gu_render|json_encode|\(int\)|intval|count)\s*\(?/';
+$findings = 0;
+foreach (files($paths) as $file) {
+    $src = file_get_contents($file) ?: '';
+    $exprs = [];
+    if (preg_match_all('/<\?=\s*(.*?)\s*\?>/s', $src, $m, PREG_OFFSET_CAPTURE)) {
+        foreach ($m[1] as $hit) {
+            $exprs[] = $hit;
+        }
+    }
+    if (preg_match_all('/\b(?:echo|print)\s+(.*?);/s', $src, $m, PREG_OFFSET_CAPTURE)) {
+        foreach ($m[1] as $hit) {
+            $exprs[] = $hit;
+        }
+    }
+    foreach ($exprs as [$expr, $offset]) {
+        if (!str_contains($expr, '$')) {
+            continue; // string literal or constant
+        }
+        if (preg_match($safe, $expr)) {
+            continue;
+        }
+        $line = substr_count(substr($src, 0, $offset), "\n") + 1;
+        fwrite(STDERR, "lint-escaping: $file:$line: unescaped output: " . trim(preg_replace('/\s+/', ' ', $expr) ?? $expr) . "\n");
+        $findings++;
+    }
+}
+if ($findings > 0) {
+    fwrite(STDERR, "lint-escaping: $findings finding(s)\n");
+    exit(1);
+}
+echo "lint-escaping: ok\n";

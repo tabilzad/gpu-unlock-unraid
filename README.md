@@ -58,6 +58,45 @@ install rule used here runs at the moment udev would have loaded the driver,
 so the driver's timing is unchanged and the only failure mode is "no unlock".
 The per-card verdicts and the card selection on the page follow their lead.
 
+Since 2.0, Zagitta/gpu-unlock also carries an Unraid plugin of its own
+(`packaging/unraid`, Unraid 7.3 and newer). It installs the module as a
+package and writes `softdep nvidia pre: gpu_unlock` to `/etc/modprobe.d`
+while plugins are installed. On Unraid 7.3 that is after the driver:
+`rc.S.cont` runs `rc.modules` (which installs the Nvidia-Driver plugin's
+cached package) and starts udev, and `rc.M` only reaches `rc.local`, which
+installs the plugins, later. Two reports of "nvidia is already loaded" on
+7.3.4, also after a power cycle, are in
+[gpu-unlock#298](https://github.com/Zagitta/gpu-unlock/issues/298). It has
+no settings page, unlocks every card unless a file on the flash drive is
+edited, and fetches its package for a new kernel during the boot. It builds
+its module from the kernel config and patches inside Unraid's own release,
+where this repository relies on ich777's prepared trees.
+
+## The settings page
+
+Settings, User Utilities, GPU Unlock. The page answers two questions first,
+what this boot did and whether the next boot is ready, and then lists the
+five things that have to be true, in order, each with the one button that
+completes it:
+
+1. **Kernel module** for the kernel the next boot runs (the staged one after
+   an Unraid update): *Fetch module*.
+2. **Firmware**: *Generate firmware*. The page follows the generation through
+   its phases with the log, without a reload, and you can leave it.
+3. **Cards**: tick them in the list (model name, chip, PCI address, the
+   driver holding the card now, this boot's result) and *Save selection*.
+4. **Boot rule**: installed with the plugin; *Switch off* skips the unlock on
+   the next boots without removing anything.
+5. **Power cycle**.
+
+Once all five are done the list folds away. The headline says so when a
+card needs a full power off, and notices appear only when something else
+needs attention: a staged Unraid update whose module is missing, firmware generated for an earlier
+gpu_unlock, a conflicting modprobe rule, Safe Mode, a saved card address
+that no longer exists. *Check now* does what the daily cron job does;
+*Copy report* puts `gpu-unlock-ctl status` on the clipboard, fenced for a
+GitHub issue. The page follows the WebGUI theme (black, white, azure, gray).
+
 ## Requirements
 
 - Unraid 7.1.0 or newer (kernel 6.12 or newer). Tested kernels: whatever has a
@@ -76,12 +115,12 @@ The per-card verdicts and the card selection on the page follow their lead.
    `https://github.com/tabilzad/gpu-unlock-unraid/releases/latest/download/gpu-unlock.plg`.
    The install fetches the module for your kernel and writes the modprobe
    rule. Nothing is loaded yet.
-2. Settings, User Utilities, GPU Unlock, **Generate firmware (Docker)**. Takes
-   a few minutes; the page shows the log. (Or in a terminal:
+2. Settings, User Utilities, GPU Unlock, step 2, **Generate firmware**. Takes
+   a few minutes; the page shows the phases and the log. (Or in a terminal:
    `gpu-unlock-ctl firmware`.)
-3. On the same page, tick the card(s) to unlock, or "all", and **Save
-   targets**. The choice is kept on the flash drive and applies at the next
-   boot. (The kernel command line still works and overrides the page:
+3. On the same page, tick the card(s) to unlock, or "every supported card",
+   and **Save selection**. The choice is kept on the flash drive and applies
+   at the next boot. (The kernel command line still works and overrides the page:
    `gpu_unlock.targets=0000:01:00.0` on the boot entry in Main, Flash,
    Syslinux Configuration. `gpu-unlock-ctl targets set ...` does the same as
    the page from a terminal.)
@@ -98,23 +137,31 @@ The per-card verdicts and the card selection on the page follow their lead.
 ## Unraid updates and new kernels
 
 The module must match the kernel exactly, so every Unraid release needs its own
-build. The `Modules` workflow runs daily: it takes the kernels listed in
-`kernels.txt` (the stable Unraid releases) plus every kernel ich777 has
-published a tree for that is newer than the newest one released here, builds
-those that have no module yet (a few per night), and attaches each to a
-release named after the kernel. A new Unraid version is normally covered
-within a day of its release. Any other kernel, for example an older release
+build. The `Modules` workflow runs daily (`scripts/discover-kernels`): it
+takes the kernels listed in `kernels.txt`, the kernel of every current stable
+Unraid release (Unraid's release feed lists the releases and each release
+note names its kernel) and every kernel ich777 has published a tree for that
+is newer than the newest one released here, builds those that have no module
+yet (a few per night), and attaches each to a release named after the kernel.
+A new Unraid version is normally covered within a day of its release, often
+before it: 6.18.60, the kernel of Unraid 7.3.5 and 7.4.0, was built six days
+before they came out. Any other kernel, for example an older release
 candidate, can be built by hand: Actions, Modules, Run workflow, with the
 kernel version as input.
 
-On the server, `gpu-unlock-ctl check` runs at every boot and daily by cron. It
-reads the kernel version of `/boot/bzimage`, which an Unraid update replaces
-before the reboot, and fetches that kernel's module in advance. So: apply the
-update, click **Check now** on the settings page (or wait for the cron), then
-reboot, and the unlock carries over. If you reboot first, the first boot into
-the new kernel runs locked, the plugin fetches the module during that boot and
-sends a notification asking for one more power cycle. If no build exists yet,
-you get a warning once per boot.
+On the server, a missing module is fetched at three moments. Every minute, a
+cron entry reads the kernel version of `/boot/bzimage`, which an Unraid
+update replaces before the reboot, and fetches that kernel's module as soon
+as it changes, then notifies you: apply the update, wait for the
+notification (or click **Check now**), reboot, and the unlock carries over.
+At every boot and daily, `gpu-unlock-ctl check` fetches whatever the running
+and the staged kernel lack and verifies the firmware. When a boot's fetch
+fails, as it does when the network is not up yet during the plugin phase, the
+plugin keeps trying in the background for about an hour. So if you reboot
+right after the update, the first boot into the new kernel runs locked, the
+module arrives during that boot and a notification asks for one more power
+cycle. If no build exists yet, you get a warning once per boot and the fetch
+is tried again every half hour.
 
 A new upstream gpu-unlock version is a plugin update: `versions.env` pins the
 upstream commit, the Modules workflow rebuilds every kernel for the new
@@ -127,7 +174,7 @@ unlocked.
 
 ## Disable, remove, recover
 
-- **Disable for the next boots**: the settings page button or
+- **Disable for the next boots**: *Switch off* on the settings page or
   `gpu-unlock-ctl disable` (a marker file; `enable` undoes it). Clearing the
   targets, removing `gpu_unlock.targets=` from the boot entry if you used
   it, or booting Safe Mode also skips it.
@@ -145,6 +192,8 @@ unlocked.
 gpu-unlock-ctl status [--json]       what is staged, each card's result this boot, the cards
 gpu-unlock-ctl targets [show | set all|ADDR,... | clear]   the cards to unlock
 gpu-unlock-ctl check [--quiet]       fetch the module for the running and the staged kernel
+gpu-unlock-ctl check --staged        the same for a staged Unraid update only (cron, every minute)
+gpu-unlock-ctl retry                 keep fetching a missing module for an hour (post-install, in the background)
 gpu-unlock-ctl fetch [KVER|--pending] [--force]
 gpu-unlock-ctl firmware [--cache DIR] | firmware import DIR
 gpu-unlock-ctl enable | disable
@@ -162,16 +211,23 @@ to fetch modules from a fork.
 ## Building and developing
 
 ```sh
-./scripts/dev-env --root make check          # lint (shellcheck, shfmt, php -l, xmllint, actionlint) and tests
+./scripts/dev-env --root make check          # lint (shellcheck, shfmt, php -l, escaping, node --check, xmllint, actionlint) and tests
 ./scripts/dev-env make build                 # dist/gpu-unlock-<version>.txz and a dev gpu-unlock.plg
 ./scripts/build-module --kver 6.18.58-Unraid # the module for one kernel (Docker; caches the ~300 MB tree)
 make firmware-gen                            # build and run the on-box generator here, into dist/firmware
+bash tests/preview.sh unlocked               # the settings page at http://127.0.0.1:8088/, without an Unraid server
 ```
 
 The tests (`tests/`) run the real hook, control tool, install and remove
 scripts against a fake root with a stub notifier, a fake `/proc/cmdline`, fake
 PCI devices and a `file://` release base, and install the package with
-Slackware's own pkgtools. Releases: tag `vX.Y.Z`; `release.yml` builds the
+Slackware's own pkgtools. The settings page is rendered by PHP against the
+same fake root in every state it distinguishes, with hostile values in
+everything the control tool reports, and its endpoints are called the way
+php-fpm would. `tests/preview.sh` serves that page from PHP's built-in web
+server with working buttons (scenarios: fresh, ready, unlocked, poweroff,
+staged, firmware); the script that drives the page in the browser has no
+automated test, the preview is how it is checked. Releases: tag `vX.Y.Z`; `release.yml` builds the
 package, renders and lints the plg and publishes them. The plugin version shown
 by Unraid is date based (`YYYY.MM.DD.N`), derived from the tag.
 

@@ -26,7 +26,8 @@ assert_rc "hook-install succeeds" 0 ctl hook-install
 assert "rule written" test "$(cat "$CONF")" = "$RULE"
 assert "hook copied to the flash drive" cmp -s "$FLASH/pre-nvidia.sh" "$REPO/src/usr/local/emhttp/plugins/gpu-unlock/hook/pre-nvidia.sh"
 assert "hook copy is executable" test -x "$FLASH/pre-nvidia.sh"
-assert_grep "cron job written" 'gpu-unlock-ctl check --quiet' "$FLASH/gpu-unlock.cron"
+assert_grep "daily cron job written" '^17 4 \* \* \* /usr/local/sbin/gpu-unlock-ctl check --quiet' "$FLASH/gpu-unlock.cron"
+assert_grep "minute cron job written" '^\* \* \* \* \* /usr/local/sbin/gpu-unlock-ctl check --staged' "$FLASH/gpu-unlock.cron"
 assert_rc "hook-install is idempotent" 0 ctl hook-install
 rm -f "$CONF"
 printf 'install nvidia /bin/true\n' >"$ROOT/boot/config/modprobe.d/other.conf"
@@ -72,6 +73,52 @@ assert_rc "check with an unpublished staged kernel fails" 1 ctl check --quiet
 assert "warned once" test "$(grep -c 'no module for kernel 6.18.70-Unraid' "$ROOT/notify.log")" = 1
 ctl check --quiet >/dev/null 2>&1
 assert "not warned again this boot" test "$(grep -c 'no module for kernel 6.18.70-Unraid' "$ROOT/notify.log")" = 1
+assert_rc "check rejects an unknown option" 1 ctl check --bogus
+
+echo "ctl: check --staged (the minute cron job)"
+RUN="$ROOT/run/gpu-unlock"
+stamp="$RUN/fetch-failed-6.18.70-Unraid"
+assert "a failed fetch left its stamp" test -e "$stamp"
+: >"$ROOT/notify.log"
+touch -d '-10 minutes' "$stamp"
+assert_rc "a kernel that failed within the half hour is not tried again" 1 ctl check --staged
+assert "and the stamp is untouched" test -n "$(find "$stamp" -mmin +9)"
+touch -d '-31 minutes' "$stamp"
+assert_rc "after half an hour it is tried again (still unpublished)" 1 ctl check --staged
+assert "a new attempt refreshes the stamp" test -z "$(find "$stamp" -mmin +30)"
+assert "no new notification" test ! -s "$ROOT/notify.log"
+fake_release 6.18.70-Unraid
+assert_rc "a fresh stamp holds even once the build is published" 1 ctl check --staged
+assert "the module is not fetched yet" test ! -e "$FLASH/modules/6.18.70-Unraid"
+touch -d '-31 minutes' "$stamp"
+assert_rc "the next attempt fetches it" 0 ctl check --staged
+assert "the staged kernel's module is on the flash drive" test -s "$FLASH/modules/6.18.70-Unraid/gpu_unlock.ko"
+assert "the stamp is gone" test ! -e "$stamp"
+assert_grep "the user is told the update is ready" 'ready for kernel 6.18.70-Unraid' "$ROOT/notify.log"
+assert_rc "nothing to do once it is there" 0 ctl check --staged
+rm -f "$ROOT/boot/bzimage"
+assert_rc "nothing to do without a staged kernel" 0 ctl check --staged
+fake_bzimage 6.18.58-Unraid
+assert_rc "nothing to do when the staged kernel is the running one" 0 ctl check --staged
+# Back to the state the tests below expect: 6.18.70 staged, not published, no module.
+rm -rf "$FLASH/modules/6.18.70-Unraid" "$ROOT/releases/6.18.70-Unraid"
+fake_bzimage 6.18.70-Unraid
+
+echo "ctl: retry (post-install starts it in the background after a boot)"
+: >"$ROOT/notify.log"
+assert_rc "retry with no delays gives up" 1 env GU_RETRY_DELAYS= "$ROOT/usr/local/sbin/gpu-unlock-ctl" retry
+assert "the pid file is gone" test ! -e "$RUN/retry.pid"
+(
+  sleep 1
+  fake_release 6.18.70-Unraid
+) &
+assert_rc "retry fetches the module once the build appears" 0 env GU_RETRY_DELAYS="2 2 2" "$ROOT/usr/local/sbin/gpu-unlock-ctl" retry
+wait
+assert "the module is on the flash drive" test -s "$FLASH/modules/6.18.70-Unraid/gpu_unlock.ko"
+assert_grep "the user is told" 'ready for kernel 6.18.70-Unraid' "$ROOT/notify.log"
+echo 999999999 >"$RUN/retry.pid"
+assert_rc "a stale pid file does not block a retry" 1 env GU_RETRY_DELAYS= "$ROOT/usr/local/sbin/gpu-unlock-ctl" retry
+rm -rf "$FLASH/modules/6.18.70-Unraid" "$ROOT/releases/6.18.70-Unraid" "$RUN/retry.pid"
 
 echo "ctl: status"
 set_cmdline gpu_unlock.targets=0000:01:00.0
@@ -95,12 +142,45 @@ assert "json: hook installed" check_json 'd["hook_installed"] is True and d["hoo
 assert "json: targets" check_json 'd["targets"] == "0000:01:00.0"'
 assert "json: cards with support flag" check_json 'sorted((c["address"], c["supported"], c["driver"]) for c in d["cards"]) == [("0000:01:00.0", True, "nvidia"), ("0000:02:00.0", False, "none")]'
 assert "json: kernel log lines" check_json 'any("gpu_unlock: unlocked" in l for l in d["kernel_log"])'
+assert "json: card chip, and not experimental for Ampere" check_json 'any(c["address"] == "0000:01:00.0" and c["chip"] == "GA102" and c["experimental"] is False and c["name"] == "" for c in d["cards"])'
+assert "json: an unsupported card has no chip" check_json 'any(c["address"] == "0000:02:00.0" and c["chip"] == "" and c["experimental"] is False for c in d["cards"])'
+assert "json: free space on the flash drive, the firmware file count, the driver" check_json 'isinstance(d["flash_free_kb"], int) and d["firmware_files"] == len("'"$FW_FILES"'".split()) and d["nvidia_loaded"] is False and d["firmware_missing"] == []'
+assert "json: no firmware job" check_json 'd["firmware_job"] is False and d["firmware_job_rc"] == "" and d["firmware_phase"] == ""'
+assert "the verified firmware set is remembered for the page" test -s "$ROOT/run/gpu-unlock/firmware.verified"
 assert "json: modules list" check_json 'sorted(m["kernel"] for m in d["modules"]) == ["6.18.58-Unraid", "6.18.60-Unraid"] and all(m["ok"] for m in d["modules"])'
 ctl status >"$out" 2>&1
 assert_rc "status text runs" 0 ctl status
 assert_grep "status text lists the card" '0000:01:00.0  device=0x2208  driver=nvidia  supported=yes' "$out"
 assert_grep "status text shows the staged kernel" 'staged kernel:  6.18.70-Unraid' "$out"
 assert_grep "status text: a missing hook record is explained" 'expected until the next boot' "$out"
+
+echo "ctl: card names, Turing, and a kernel log with control characters"
+mkdir -p "$ROOT/usr/share/hwdata" "$ROOT/proc/driver/nvidia/gpus/0000:01:00.0"
+printf '10de  NVIDIA Corporation\n\t1e04  TU102 [GeForce RTX 2080 Ti]\n\t2208  GA102 [GeForce RTX 3080 Ti]\n10df  Emulex Corporation\n\t1e04  not this one\n' >"$ROOT/usr/share/hwdata/pci.ids"
+fake_card 0000:05:00.0 0x1e04
+ctl status --json >"$out"
+assert "json: name from the PCI id database" check_json 'any(c["address"] == "0000:01:00.0" and c["name"] == "GeForce RTX 3080 Ti" for c in d["cards"])'
+assert "json: Turing is experimental" check_json 'any(c["address"] == "0000:05:00.0" and c["chip"] == "TU102" and c["experimental"] is True and c["supported"] is True and c["name"] == "GeForce RTX 2080 Ti" for c in d["cards"])'
+printf 'Model: \t\t NVIDIA GeForce RTX 3080 Ti\nIRQ:   \t\t 131\n' >"$ROOT/proc/driver/nvidia/gpus/0000:01:00.0/information"
+ctl status >"$out" 2>&1
+assert_grep "status text: chip and the name the driver reports" 'supported=yes  chip=GA102  NVIDIA GeForce RTX 3080 Ti' "$out"
+printf '[    5.0] pci 0000:01:00.0: gpu_unlock: unlocked\n[    5.1] gpu_unlock: odd \033[31mbytes\001 here\n' >"$ROOT/var/log/dmesg"
+ctl status --json >"$out"
+assert_rc "json: still valid with control characters in the log" 0 python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$out"
+assert "json: the characters are dropped, the line is kept" check_json 'any(l.endswith("gpu_unlock: odd [31mbytes here") for l in d["kernel_log"])'
+rm -rf "$ROOT/sys/bus/pci/devices/0000:05:00.0" "$ROOT/proc/driver" "$ROOT/usr/share/hwdata"
+printf '[    5.0] pci 0000:01:00.0: gpu_unlock: unlocked\n[    6.0] NVRM: loading NVIDIA UNIX Open Kernel Module\n' >"$ROOT/var/log/dmesg"
+
+echo "ctl: the background firmware job in the status"
+printf 'building gpu-unlock/firmware-gen\ngenerating firmware 610.43.03 with gpu-unlock/firmware-gen\nfirmware-gen: both inputs match their pinned SHA-256\n' >"$ROOT/run/gpu-unlock/firmware.log"
+echo $$ >"$ROOT/run/gpu-unlock/firmware.pid"
+ctl status --json >"$out"
+assert "json: a running job and its phase" check_json 'd["firmware_job"] is True and d["firmware_phase"] == "extract" and len(d["firmware_log"]) == 3'
+echo 999999999 >"$ROOT/run/gpu-unlock/firmware.pid"
+echo 1 >"$ROOT/run/gpu-unlock/firmware.rc"
+ctl status --json >"$out"
+assert "json: a finished job and its exit status" check_json 'd["firmware_job"] is False and d["firmware_job_rc"] == "1"'
+rm -f "$ROOT/run/gpu-unlock/firmware.pid" "$ROOT/run/gpu-unlock/firmware.rc" "$ROOT/run/gpu-unlock/firmware.log"
 
 echo "ctl: enable/disable"
 assert_rc "disable" 0 ctl disable
@@ -249,9 +329,24 @@ printf '[    5.0] pci 0000:01:00.0: gpu_unlock: unlocked\n[    6.0] NVRM: loadin
 set_cmdline gpu_unlock.targets=0000:01:00.0
 
 echo "post-install and remove"
+rm -f "$RUN/retry.log"
 "$ROOT/usr/local/emhttp/plugins/gpu-unlock/scripts/post-install" >"$out" 2>&1
 assert_rc "post-install exits 0" 0 "$ROOT/usr/local/emhttp/plugins/gpu-unlock/scripts/post-install"
 assert_grep "post-install summary: module" "module $MV for 6.18.58-Unraid: on the flash drive" "$out"
+# The staged kernel (6.18.70) has no build: post-install started the retry in
+# the background (with no delays in the tests, it gives up at once).
+for _ in $(seq 1 50); do
+  [ -s "$RUN/retry.log" ] && break
+  sleep 0.1
+done
+assert_grep "post-install started the retry for the staged kernel" 'still no module' "$RUN/retry.log"
+fake_release 6.18.70-Unraid
+ctl fetch --pending >/dev/null
+rm -f "$RUN/retry.log"
+"$ROOT/usr/local/emhttp/plugins/gpu-unlock/scripts/post-install" >/dev/null 2>&1
+sleep 0.3
+assert "no retry when every module is there" test ! -e "$RUN/retry.log"
+rm -rf "$FLASH/modules/6.18.70-Unraid" "$ROOT/releases/6.18.70-Unraid"
 assert_grep "post-install summary: firmware" 'firmware 610.43.03: on the flash drive' "$out"
 assert_grep "post-install summary: targets" 'targets: 0000:01:00.0' "$out"
 "$ROOT/usr/local/emhttp/plugins/gpu-unlock/scripts/remove" >"$out" 2>&1

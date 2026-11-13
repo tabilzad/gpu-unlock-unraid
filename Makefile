@@ -2,29 +2,30 @@
 #
 # Run `./scripts/dev-env --root make check` to execute everything inside the
 # pinned Docker image, or plain `make check` on a Linux machine that has
-# shellcheck, shfmt, php, xmllint, kmod and Slackware's pkgtools.
+# shellcheck, shfmt, php, node, xmllint, kmod and Slackware's pkgtools.
 
 SHELL := /bin/bash
 .SHELLFLAGS := -eu -o pipefail -c
 
 PLUGIN     := gpu-unlock
 PLUGIN_DIR := src/usr/local/emhttp/plugins/$(PLUGIN)
-SH_FILES   := scripts/build-txz scripts/render-plg scripts/lint-plg scripts/plugin-version \
+SH_FILES   := scripts/build-txz scripts/render-plg scripts/lint-plg scripts/plugin-version scripts/discover-kernels \
               scripts/dev-env scripts/build-module \
               src/usr/local/sbin/gpu-unlock-ctl $(PLUGIN_DIR)/scripts/lib.sh \
               $(PLUGIN_DIR)/scripts/post-install $(PLUGIN_DIR)/scripts/remove \
               $(PLUGIN_DIR)/hook/pre-nvidia.sh $(PLUGIN_DIR)/docker/firmware-gen.sh \
-              tests/run.sh tests/lib.sh tests/test-hook.sh tests/test-ctl.sh tests/test-pkg.sh
-PHP_FILES  := $(shell find src -name '*.php' | sort)
+              tests/run.sh tests/lib.sh tests/test-hook.sh tests/test-ctl.sh tests/test-pkg.sh tests/test-page.sh tests/preview.sh
+PHP_FILES  := $(shell find src tests -name '*.php' | sort) scripts/lint-escaping
+JS_FILES   := $(shell find src -name '*.js' | sort)
 PAGE_FILES := $(shell find src -name '*.page' | sort)
 KVER       ?= 6.18.58-Unraid
 
-.PHONY: check lint test build module firmware-gen fmt lint-shell lint-php lint-plg lint-workflows
+.PHONY: check lint test build module firmware-gen fmt lint-shell lint-php lint-escaping lint-js lint-plg lint-workflows
 
 check: lint test
 	@echo "check: ok"
 
-lint: lint-shell lint-php lint-plg lint-workflows
+lint: lint-shell lint-php lint-escaping lint-js lint-plg lint-workflows
 	@echo "lint: ok"
 
 lint-shell:
@@ -38,6 +39,14 @@ lint-php:
 	@for f in $(PHP_FILES); do php -l "$$f" > /dev/null || exit 1; done
 	@mkdir -p .tmp/pages
 	@for f in $(PAGE_FILES); do sed '1,/^---$$/d' "$$f" > ".tmp/pages/$$(basename "$$f").php" && php -l ".tmp/pages/$$(basename "$$f").php" > /dev/null || exit 1; done
+
+# No page or PHP file under src/ may print a variable into HTML unescaped.
+lint-escaping:
+	php scripts/lint-escaping src
+
+# The page script has to parse; nothing else in the build would notice.
+lint-js:
+	@if command -v node > /dev/null 2>&1; then echo "node --check ($(words $(JS_FILES)) files)"; for f in $(JS_FILES); do node --check "$$f" || exit 1; done; else echo "lint-js: node not installed, skipped"; fi
 
 # Render the template with dev values, then check it with xmllint (entity
 # expansion) and our own rules.

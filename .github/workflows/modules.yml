@@ -2,13 +2,14 @@ name: Modules
 
 # Builds gpu_unlock.ko for Unraid kernels and publishes each build as a GitHub
 # release named after the kernel (6.18.58-Unraid, ...), which is where the
-# plugin's gpu-unlock-ctl fetches it from. Once a day the discover job takes
-# the kernels in kernels.txt plus every kernel ich777 has published a prepared
-# tree for that is newer than the newest one released here, and builds (at
-# most a few per night) those that have no module of the pinned
-# MODULE_VERSION yet. A new Unraid release therefore gets its module without
-# anyone touching this repository. Manual runs can name kernels and force a
-# rebuild.
+# plugin's gpu-unlock-ctl fetches it from. Once a day the discover job
+# (scripts/discover-kernels) takes the kernels in kernels.txt, the kernel of
+# every current stable Unraid release (from Unraid's own release feed) and
+# every kernel ich777 has published a prepared tree for that is newer than the
+# newest one released here, and builds (at most a few per night) those that
+# have no module of the pinned MODULE_VERSION yet. A new Unraid release
+# therefore gets its module without anyone touching this repository. Manual
+# runs can name kernels and force a rebuild.
 #
 # Only GPL code is built here; no NVIDIA file is ever downloaded or published.
 
@@ -55,51 +56,10 @@ jobs:
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          mv=$(sed -n 's/^MODULE_VERSION=//p' versions.env)
-          min=$(sed -n 's/^MIN_KERNEL=//p' versions.env)
-          max_new=6
-          kver_re='^[0-9]+\.[0-9]+\.[0-9]+-Unraid$'
-          # ge A B: version A is B or newer
-          ge() { [ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -n1)" = "$2" ]; }
-          # Blank lines are dropped with sed, never with grep -v: an empty list
-          # is the normal "nothing to build" case, and grep -v exits 1 when it
-          # prints nothing, which under pipefail fails the whole step (it did,
-          # every night, once every listed kernel had its module).
-          if [ -n "$INPUT_KERNELS" ]; then
-            list=$(printf '%s' "$INPUT_KERNELS" | tr ',' '\n' | tr -d ' ' | grep -E "$kver_re" || true)
-          else
-            # The kernels in kernels.txt, plus every published kernel newer than
-            # the newest one that has a release here (or than the newest listed).
-            listed=$(sed 's/#.*//' kernels.txt | tr -d ' \t' | grep -E "$kver_re" || true)
-            published=$(gh release list -R ich777/unraid_kernel --limit 300 --json tagName -q '.[].tagName' |
-              grep -E "$kver_re" | sort -V)
-            ours=$(gh release list -R "$REPO" --limit 300 --json tagName -q '.[].tagName' | grep -E "$kver_re" || true)
-            top=$(printf '%s\n%s\n' "$ours" "$listed" | sed '/^$/d' | sort -V | tail -n1)
-            newer=$(printf '%s\n' "$published" | while read -r k; do
-              [ -n "$k" ] || continue
-              ge "$k" "$min-Unraid" || continue
-              if [ "$k" = "$top" ] || ! ge "$k" "$top"; then continue; fi
-              printf '%s\n' "$ours" | grep -qx "$k" || echo "$k"
-            done)
-            list=$(printf '%s\n%s\n' "$listed" "$newer" | sed '/^$/d' | sort -uV)
-          fi
-          if [ "$INPUT_FORCE" != true ]; then
-            list=$(printf '%s\n' "$list" | while read -r k; do
-              [ -n "$k" ] || continue
-              if gh release view "$k" -R "$REPO" --json assets -q '.assets[].name' 2> /dev/null | grep -qx "gpu_unlock-$mv-$k.ko"; then
-                echo "::notice::$k already has gpu_unlock-$mv-$k.ko" >&2
-                continue
-              fi
-              echo "$k"
-            done)
-          fi
-          if [ -z "$INPUT_KERNELS" ]; then
-            # A bounded amount of work per night; the rest follows on later nights.
-            list=$(printf '%s\n' "$list" | sed '/^$/d' | sort -V | tail -n "$max_new")
-          fi
-          json=$(printf '%s\n' "$list" | sed '/^$/d' | jq -R . | jq -s -c .)
-          [ "$json" != '[]' ] || echo "nothing to build: every kernel in scope has its module"
-          echo "kernels to build: $json"
+          args=(--repo "$REPO")
+          [ -z "$INPUT_KERNELS" ] || args+=(--kernels "$INPUT_KERNELS")
+          [ "$INPUT_FORCE" != true ] || args+=(--force)
+          json=$(./scripts/discover-kernels "${args[@]}")
           echo "kernels=$json" >> "$GITHUB_OUTPUT"
 
   build:

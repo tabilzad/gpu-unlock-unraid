@@ -5,6 +5,8 @@
 #
 #   gpu-unlock-ctl status [--json]      what is on the flash drive, what this boot did, the cards
 #   gpu-unlock-ctl check [--quiet]      fetch the module for the running and the staged kernel, notify
+#   gpu-unlock-ctl check --staged       the same for a staged Unraid update only (cron, every minute)
+#   gpu-unlock-ctl retry                keep fetching a missing module for an hour (post-install, in the background)
 #   gpu-unlock-ctl fetch [KVER] [--force]   download one kernel's module from the GitHub release
 #   gpu-unlock-ctl firmware [--cache DIR] [--background]   generate the firmware with Docker
 #   gpu-unlock-ctl firmware import DIR  take firmware generated elsewhere (gpu-unlock/<nv>/*.bin)
@@ -30,7 +32,7 @@ die() {
 }
 
 usage() {
-  sed -n '5,17p' "$0"
+  sed -n '5,19p' "$0"
 }
 
 # ---------------------------------------------------------------------------
@@ -99,19 +101,22 @@ fetch_module() {
 # check: running kernel, staged kernel, firmware; notifications
 # ---------------------------------------------------------------------------
 
-check_cmd() {
-  local quiet=0 running pending k problems=0 fetched fw
-  [ "${1:-}" = --quiet ] && quiet=1
+# fetch_missing QUIET KVER...: fetch the module of every kernel named that has
+# none on the flash drive, and tell the user. The notifications are the same
+# whoever calls: check, its two cron entries, the retry after a boot. Returns 1
+# when a module is still missing afterwards.
+fetch_missing() {
+  local quiet=$1 running k fetched problems=0
+  shift
   running=$(running_kernel)
-  pending=$(pending_kernel || true)
-  [ "$pending" = "$running" ] && pending=""
-  for k in $running $pending; do
+  for k in "$@"; do
     if module_ok "$k"; then
       [ "$quiet" = 1 ] || echo "module $MODULE_VERSION for $k: present"
       continue
     fi
     if [ "$quiet" = 1 ]; then (fetch_module "$k") >/dev/null 2>&1 && fetched=0 || fetched=1; else (fetch_module "$k") && fetched=0 || fetched=1; fi
     if [ "$fetched" = 0 ]; then
+      rm -f "$RUN_DIR/fetch-failed-$k"
       if [ "$k" = "$running" ]; then
         notify normal "GPU Unlock: module for $k installed" \
           "The module for the running kernel is now on the flash drive. The unlock runs at the next boot: power the server off fully, then start it (a card the driver already initialised is refused)."
@@ -121,10 +126,47 @@ check_cmd() {
       fi
     else
       problems=1
+      # check --staged reads the stamp: a kernel whose fetch failed is tried
+      # again every half hour, not every minute.
+      { mkdir -p "$RUN_DIR" && : >"$RUN_DIR/fetch-failed-$k"; } 2>/dev/null || true
       notify_once "nomodule-$k" warning "GPU Unlock: no module for kernel $k" \
-        "The module for $k could not be fetched, so the unlock does not run on that kernel: either no gpu_unlock $MODULE_VERSION build is published for it yet (builds appear at $RELEASES_PAGE within a day of a new Unraid release) or the download failed, for example without network early in the boot. Click Check now in Settings, User Utilities, GPU Unlock, or run gpu-unlock-ctl check, to try again."
+        "The module for $k could not be fetched, so the unlock does not run on that kernel: either no gpu_unlock $MODULE_VERSION build is published for it yet (builds appear at $RELEASES_PAGE within a day of a new Unraid release) or the download failed, for example without network early in the boot. The plugin keeps trying; click Check now in Settings, User Utilities, GPU Unlock, or run gpu-unlock-ctl check, to try at once."
     fi
   done
+  return "$problems"
+}
+
+# check [--quiet]: the modules for the running and the staged kernel, then the
+# firmware; at every boot and daily by cron.
+# check --staged: the other cron entry, every minute. It reads the kernel
+# version of /boot/bzimage and does nothing more unless an Unraid update is
+# staged whose module is missing, so that an update followed by a reboot a few
+# minutes later still carries the unlock over. A kernel whose fetch failed (no
+# build published yet) is tried again every half hour.
+check_cmd() {
+  local quiet=0 staged=0 a running pending problems=0 fw stamp
+  for a in "$@"; do
+    case "$a" in
+      --quiet) quiet=1 ;;
+      --staged) staged=1 ;;
+      *) die "usage: gpu-unlock-ctl check [--quiet | --staged]" ;;
+    esac
+  done
+  running=$(running_kernel)
+  pending=$(pending_kernel || true)
+  [ "$pending" = "$running" ] && pending=""
+  if [ "$staged" = 1 ]; then
+    [ -n "$pending" ] || return 0
+    module_ok "$pending" && return 0
+    stamp="$RUN_DIR/fetch-failed-$pending"
+    if [ -e "$stamp" ] && [ -z "$(find "$stamp" -mmin +30 2>/dev/null)" ]; then
+      return 1
+    fi
+    fetch_missing 1 "$pending"
+    return $?
+  fi
+  # shellcheck disable=SC2086 # one or two kernel versions, never empty
+  fetch_missing "$quiet" $running $pending || problems=1
   fw=$(firmware_state)
   case "$fw" in
     present) [ "$quiet" = 1 ] || echo "firmware $NV: present" ;;
@@ -156,6 +198,39 @@ check_cmd() {
       ;;
   esac
   return "$problems"
+}
+
+# retry: fetch what the running and the staged kernel lack, trying again at
+# growing intervals for about an hour. post-install starts it in the
+# background when the fetch during the plugin phase of a boot failed, which it
+# does whenever the network is not up yet at that point (the download is
+# 120 KB, so the first boot into a new kernel can still end with the module
+# on the flash drive and one notification asking for a power cycle).
+retry_cmd() {
+  local delays="30 60 120 300 600 900 1800" d running pending
+  # GU_RETRY_DELAYS: test suite only.
+  [ "$test_mode" = 1 ] && delays=${GU_RETRY_DELAYS-$delays}
+  mkdir -p "$RUN_DIR"
+  if [ -s "$RETRY_PID" ] && kill -0 "$(cat "$RETRY_PID")" 2>/dev/null; then
+    echo "a retry is already running (pid $(cat "$RETRY_PID"))"
+    return 0
+  fi
+  echo $$ >"$RETRY_PID"
+  for d in $delays; do
+    sleep "$d"
+    running=$(running_kernel)
+    pending=$(pending_kernel || true)
+    [ "$pending" = "$running" ] && pending=""
+    # shellcheck disable=SC2086 # one or two kernel versions, never empty
+    if fetch_missing 1 $running $pending; then
+      rm -f "$RETRY_PID"
+      echo "every module is on the flash drive"
+      return 0
+    fi
+  done
+  rm -f "$RETRY_PID"
+  log warning "still no module for the running or the staged kernel after an hour of retries; the daily check tries again, or click Check now in Settings, User Utilities, GPU Unlock"
+  return 1
 }
 
 # ---------------------------------------------------------------------------
@@ -250,7 +325,11 @@ firmware_cmd() {
         return 0
       fi
       : >"$FIRMWARE_LOG"
-      nohup "$CTL_BIN" firmware "$@" >>"$FIRMWARE_LOG" 2>&1 </dev/null &
+      rm -f "$FIRMWARE_RC"
+      # The wrapper keeps the exit status for the settings page, which follows
+      # the job through `status --json`.
+      # shellcheck disable=SC2016 # expanded by the inner shell
+      nohup bash -c '"$1" firmware "${@:3}"; echo "$?" >"$2"' _ "$CTL_BIN" "$FIRMWARE_RC" "$@" >>"$FIRMWARE_LOG" 2>&1 </dev/null &
       echo $! >"$FIRMWARE_PID"
       echo "firmware generation started in the background (pid $!); log: $FIRMWARE_LOG"
       ;;
@@ -281,8 +360,10 @@ hook_install_cmd() {
     echo "modprobe rule written to $MODPROBE_CONF"
   fi
   printf '%s\n' \
-    "# gpu-unlock: fetch the module for a new or staged Unraid kernel (installed by the plugin)" \
-    "17 4 * * * /usr/local/sbin/gpu-unlock-ctl check --quiet > /dev/null 2>&1" |
+    "# gpu-unlock (installed by the plugin): daily, fetch the module for a new or staged Unraid kernel and check the firmware;" \
+    "# every minute, read the kernel version of /boot/bzimage and fetch its module as soon as an Unraid update is staged" \
+    "17 4 * * * /usr/local/sbin/gpu-unlock-ctl check --quiet > /dev/null 2>&1" \
+    "* * * * * /usr/local/sbin/gpu-unlock-ctl check --staged > /dev/null 2>&1" |
     atomic_write "$CRON_FILE" 0644 || true
   [ -x "$UPDATE_CRON_BIN" ] && "$UPDATE_CRON_BIN" >/dev/null 2>&1 || true
   return "$rc"
@@ -299,6 +380,9 @@ json_str() {
   s=${s//$'\n'/\\n}
   s=${s//$'\r'/\\r}
   s=${s//$'\t'/\\t}
+  # Any other control character (a log line can carry one) would make the
+  # document invalid JSON, and the page would lose the whole status.
+  s=${s//[[:cntrl:]]/}
   printf '"%s"' "$s"
 }
 json_bool() { if "$@"; then printf 'true'; else printf 'false'; fi; }
@@ -318,8 +402,33 @@ firmware_job_running() {
   [ -s "$FIRMWARE_PID" ] && kill -0 "$(cat "$FIRMWARE_PID")" 2>/dev/null
 }
 
+# firmware_phase: how far the background generation got, read from its log:
+# build (the generator image), download (NVIDIA's files), extract, install,
+# done. Empty when no generation was started from the page this boot.
+firmware_phase() {
+  [ -s "$FIRMWARE_LOG" ] || return 0
+  if grep -q 'is on the flash drive' "$FIRMWARE_LOG"; then
+    printf 'done'
+  elif grep -q '^firmware-gen: wrote ' "$FIRMWARE_LOG"; then
+    printf 'install'
+  elif grep -q '^firmware-gen: both inputs match' "$FIRMWARE_LOG"; then
+    printf 'extract'
+  elif grep -q '^generating firmware ' "$FIRMWARE_LOG"; then
+    printf 'download'
+  else
+    printf 'build'
+  fi
+}
+
+# flash_free_kb: free space on the flash drive in KiB, or null when unknown.
+flash_free_kb() {
+  local free
+  free=$(df -Pk "$FLASH_DIR" 2>/dev/null | awk 'NR == 2 { print $4 }')
+  if [[ "$free" =~ ^[0-9]+$ ]]; then printf '%s' "$free"; else printf 'null'; fi
+}
+
 status_json() {
-  local running pending conflict targets hook first k line pending_ok pci state reason power
+  local running pending conflict targets hook first k line pending_ok pci state reason power experimental fw
   running=$(running_kernel)
   pending=$(pending_kernel || true)
   [ "$pending" = "$running" ] && pending=""
@@ -347,10 +456,17 @@ status_json() {
     printf '{"kernel":%s,"ok":%s}' "$(json_str "$k")" "$(json_bool module_ok "$k")"
   done
   printf '],'
-  printf '"firmware_present":%s,' "$(json_bool firmware_ok)"
-  printf '"firmware_state":%s,' "$(json_str "$(firmware_state)")"
+  fw=$(firmware_state quick)
+  printf '"firmware_present":%s,' "$(json_bool test "$fw" = present)"
+  printf '"firmware_state":%s,' "$(json_str "$fw")"
+  printf '"firmware_missing":%s,' "$(firmware_missing | json_list)"
+  printf '"firmware_files":%s,' "$(printf '%s' "$FIRMWARE_FILES" | wc -w | tr -d ' ')"
   printf '"firmware_job":%s,' "$(json_bool firmware_job_running)"
-  printf '"firmware_log":%s,' "$(tail -n 15 "$FIRMWARE_LOG" 2>/dev/null | json_list)"
+  printf '"firmware_job_rc":%s,' "$(json_str "$(tr -cd '0-9' 2>/dev/null <"$FIRMWARE_RC" || true)")"
+  printf '"firmware_phase":%s,' "$(json_str "$(firmware_phase)")"
+  printf '"firmware_log":%s,' "$(tail -n 40 "$FIRMWARE_LOG" 2>/dev/null | json_list)"
+  printf '"flash_free_kb":%s,' "$(flash_free_kb)"
+  printf '"nvidia_loaded":%s,' "$(json_bool test -d "$ROOT/sys/module/nvidia")"
   printf '"hook_installed":%s,' "$(json_bool hook_installed)"
   printf '"hook_conflict":%s,' "$(json_str "${conflict% }")"
   printf '"disabled":%s,' "$(json_bool test -e "$DISABLED_MARKER")"
@@ -375,12 +491,16 @@ status_json() {
   first=1
   while read -r line; do
     [ -n "$line" ] || continue
-    # shellcheck disable=SC2086 # the line is four space-separated fields
+    # shellcheck disable=SC2086 # the line is five space-separated fields
     set -- $line
     [ "$first" = 1 ] || printf ','
     first=0
-    printf '{"address":%s,"device":%s,"driver":%s,"supported":%s}' \
-      "$(json_str "$1")" "$(json_str "$2")" "$(json_str "$3")" "$(json_bool test "$4" = yes)"
+    # Upstream marks Turing and Ada Lovelace experimental.
+    experimental=false
+    case "$5" in TU* | AD*) experimental=true ;; esac
+    printf '{"address":%s,"device":%s,"driver":%s,"supported":%s,"chip":%s,"experimental":%s,"name":%s}' \
+      "$(json_str "$1")" "$(json_str "$2")" "$(json_str "$3")" "$(json_bool test "$4" = yes)" \
+      "$(json_str "${5#-}")" "$experimental" "$(json_str "$(card_name "$1" "$2")")"
   done < <(nvidia_cards)
   printf '],'
   printf '"releases":%s' "$(json_str "$RELEASES_PAGE")"
@@ -388,7 +508,7 @@ status_json() {
 }
 
 status_text() {
-  local running pending targets line
+  local running pending targets line name chip
   running=$(running_kernel)
   pending=$(pending_kernel || true)
   [ "$pending" = "$running" ] && pending=""
@@ -430,9 +550,12 @@ status_text() {
   echo "=== NVIDIA cards ==="
   while read -r line; do
     [ -n "$line" ] || continue
-    # shellcheck disable=SC2086 # the line is four space-separated fields
+    # shellcheck disable=SC2086 # the line is five space-separated fields
     set -- $line
-    echo "$1  device=$2  driver=$3  supported=$4"
+    name=$(card_name "$1" "$2")
+    chip=${5:-}
+    chip=${chip#-}
+    echo "$1  device=$2  driver=$3  supported=$4${chip:+  chip=$chip}${name:+  $name}"
   done < <(nvidia_cards)
   if [ -z "$ROOT" ] && command -v nvidia-smi >/dev/null 2>&1; then
     echo
@@ -470,7 +593,7 @@ targets_cmd() {
             fi
           done < <(nvidia_cards)
           [ "$found" = 1 ] || die "$pci is not an NVIDIA display controller on this server"
-          [ "$supported" = yes ] || die "$pci is not a card gpu_unlock supports (GA102, GA103, GA104, GA106)"
+          [ "$supported" = yes ] || die "$pci is not a card gpu_unlock $MODULE_VERSION supports"
         done
       fi
       printf '%s\n' "$list" | atomic_write "$TARGETS_FILE" 0644 || die "cannot write $TARGETS_FILE"
@@ -547,6 +670,7 @@ case "$cmd" in
     if [ "${1:-}" = --json ]; then status_json; else status_text; fi
     ;;
   check) check_cmd "$@" ;;
+  retry) retry_cmd ;;
   fetch)
     force=0
     kver=""

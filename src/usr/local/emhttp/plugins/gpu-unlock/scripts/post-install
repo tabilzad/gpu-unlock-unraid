@@ -23,6 +23,17 @@ fi
 "$CTL_BIN" report >/dev/null 2>&1 || true
 
 running=$(running_kernel)
+pending=$(pending_kernel || true)
+[ "$pending" = "$running" ] && pending=""
+# In the plugin phase of a boot the network is often not up yet and the fetch
+# above fails. Keep trying in the background for about an hour, so the first
+# boot into a new kernel still ends with the module on the flash drive.
+for k in $running $pending; do
+  if ! module_ok "$k"; then
+    nohup "$CTL_BIN" retry >>"$RETRY_LOG" 2>&1 </dev/null &
+    break
+  fi
+done
 targets=$(effective_targets)
 if module_ok "$running"; then module_line="module $MODULE_VERSION for $running: on the flash drive"; else module_line="module for $running: NOT available yet (the unlock cannot run on this kernel)"; fi
 case "$(firmware_state)" in

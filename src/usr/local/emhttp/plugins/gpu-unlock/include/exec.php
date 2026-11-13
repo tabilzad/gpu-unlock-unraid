@@ -27,6 +27,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') {
     gu_fail(405, 'POST required');
 }
 
+// action => [arguments of gpu-unlock-ctl, timeout in seconds]
 $gu_actions = [
     'fetch' => [['fetch'], 180],
     'fetch-pending' => [['fetch', '--pending'], 180],
@@ -36,6 +37,8 @@ $gu_actions = [
     'disable' => [['disable'], 10],
     'hook-install' => [['hook-install'], 30],
     'targets-clear' => [['targets', 'clear'], 10],
+    // The text of `gpu-unlock-ctl status`, for the Copy report button.
+    'diagnostics' => [['status'], 60],
 ];
 $gu_action = $_POST['action'] ?? '';
 if (!is_string($gu_action)) {
@@ -56,5 +59,5 @@ if ($gu_action === 'targets') {
 }
 [$gu_rc, $gu_out] = gu_run($gu_args, $gu_timeout);
 http_response_code($gu_rc === 0 ? 200 : 400);
-echo json_encode(['ok' => $gu_rc === 0, 'rc' => $gu_rc, 'output' => $gu_out],
+echo json_encode(['ok' => $gu_rc === 0, 'rc' => $gu_rc, 'action' => $gu_action, 'output' => $gu_out],
     JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE), "\n";

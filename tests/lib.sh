@@ -59,6 +59,9 @@ finish() {
 setup_root() {
   ROOT=$(mktemp -d "${TMPDIR:-/tmp}/gu-test.XXXXXX")
   export ROOT GU_TEST_MODE=1
+  # A retry post-install starts in the background gives up at once (no
+  # delays) instead of sleeping on after the test; the retry test sets its own.
+  export GU_RETRY_DELAYS=
   mkdir -p "$ROOT"/{boot/config/plugins,boot/config/modprobe.d,proc,run,sys/bus/pci/devices,sys/module,lib/firmware,usr/local/emhttp/webGui/scripts,usr/local/sbin,var/log,tmp}
   cp -R "$REPO/src/." "$ROOT/"
   cp "$REPO/versions.env" "$ROOT/usr/local/emhttp/plugins/gpu-unlock/gpu-unlock.env"

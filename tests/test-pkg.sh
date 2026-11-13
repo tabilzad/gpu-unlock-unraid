@@ -20,6 +20,9 @@ assert "hook is executable" bash -c "printf '%s\n' \"\$1\" | grep -q '^-rwxr-xr-
 assert "env file is packaged" bash -c "printf '%s\n' \"\$1\" | grep -q ' usr/local/emhttp/plugins/gpu-unlock/gpu-unlock.env\$'" _ "$listing"
 assert "slack-desc is packaged" bash -c "printf '%s\n' \"\$1\" | grep -q ' install/slack-desc\$'" _ "$listing"
 assert "page is packaged" bash -c "printf '%s\n' \"\$1\" | grep -q ' usr/local/emhttp/plugins/gpu-unlock/GpuUnlock.page\$'" _ "$listing"
+for f in styles/gpu-unlock.css javascript/gpu-unlock.js include/render.php include/model.php include/ui.php include/view.php include/exec.php include/status.php; do
+  assert "$f is packaged, not executable" bash -c "printf '%s\n' \"\$1\" | grep -q \"^-rw-r--r-- .* usr/local/emhttp/plugins/gpu-unlock/\$2\\\$\"" _ "$listing" "$f"
+done
 txz2=$("$REPO/scripts/build-txz" --version 0000.00.00.0-dev --out-dir "$tmp/dist2")
 assert "build is reproducible" cmp -s "$txz" "$txz2"
 

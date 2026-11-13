@@ -3,6 +3,81 @@
 All notable changes to the GPU Unlock plugin for Unraid. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+
+- The settings page is rebuilt in the style of tabilzad's other Unraid
+  plugins. It opens with what this boot did and whether the next boot is
+  ready, then lists the five setup steps in order (kernel module, firmware,
+  cards, boot rule, power cycle), each with its state and the one button
+  that completes it; the list folds away once all five are done.
+- The page no longer needs a reload: after every action, and every three
+  seconds while a firmware generation runs, its content is replaced with a
+  fresh render. A generation shows its phases (build the image, download,
+  extract, write to the flash drive) and the log as it goes, and its
+  outcome when it ends. A card selection that is not saved yet survives the
+  refresh.
+- The card list shows the model name (from the NVIDIA driver, otherwise the
+  PCI id database), the chip, an "experimental" mark for Turing and Ada, the
+  driver that holds the card now and this boot's result with the module's
+  reason. A click on a row ticks it; Save selection is enabled only when
+  something changed.
+- Notices for what needs attention: a staged Unraid update whose module is
+  missing (with a Fetch button), firmware generated for an earlier
+  gpu_unlock, a conflicting modprobe rule, Safe Mode, the unlock switched
+  off, a saved card address that is no card any more, the NVIDIA driver not
+  loaded, too little free space on the flash drive for the firmware.
+- Copy report: `gpu-unlock-ctl status` on the clipboard, fenced for a GitHub
+  issue.
+- The page follows the WebGUI theme (black, white, azure, gray) through
+  Unraid's theme variables and stacks on narrow screens.
+- `status --json` reports each card's `name`, `chip` and `experimental`,
+  the background firmware job (`firmware_job_rc`, `firmware_phase`), the
+  missing firmware files, the free space on the flash drive and whether the
+  NVIDIA driver is loaded.
+- Modules for Unraid 7.3.0 to 7.3.2 (kernels 6.18.29, 6.18.33 and 6.18.38):
+  `kernels.txt` lists them, so the Modules workflow builds them and keeps
+  them built. 6.18.60, the kernel of Unraid 7.3.5 and 7.4.0, is listed too
+  (its module has been published since 2026-11-03).
+- The Modules workflow also builds the kernel of every current stable Unraid
+  release on its own, read from Unraid's release feed and release notes
+  (`scripts/discover-kernels`, which replaces the inline discover step), so a
+  new Unraid version is covered without an edit to `kernels.txt`, also when
+  its kernel is older than a release candidate's already built.
+- A staged Unraid update is noticed within a minute: a second cron entry
+  reads the kernel version of `/boot/bzimage` every minute and fetches that
+  kernel's module as soon as an update is staged, with a notification, so
+  the unlock carries over a reboot that follows the update right away. A
+  kernel whose build is not published yet is tried again every half hour.
+- When the fetch during the plugin phase of a boot fails (the network is
+  often not up yet at that point), post-install starts `gpu-unlock-ctl
+  retry`, which keeps trying in the background for about an hour. The first
+  boot into a new kernel therefore ends with the module on the flash drive
+  and one notification asking for a power cycle, instead of a boot that
+  stays locked until the daily check ([#2](https://github.com/tabilzad/gpu-unlock-unraid/issues/2)).
+- `tests/preview.sh` serves the page with working buttons against a fake
+  root, for looking at it without an Unraid server; `make check` renders the
+  page in every state, checks that everything it prints is escaped and that
+  the page script parses.
+
+### Changed
+
+- "Ready for the next boot" follows the kernel the next boot runs: with an
+  Unraid update staged, the module that counts is the staged kernel's.
+- The page's status request no longer reads the whole firmware (about
+  110 MB on the flash drive) every time: a set that verified earlier in the
+  same boot and is unchanged since is taken as present. `check` and the boot
+  hook verify in full as before.
+
+### Fixed
+
+- A control character in a kernel or firmware log line made `status --json`
+  invalid, and the page then showed nothing but "gpu-unlock-ctl did not
+  answer". Such characters are dropped.
+- `targets set` named the Ampere chips only when it refused an unsupported
+  card.
+
 ## [0.3.0] - 2026-10-30
 
 ### Fixed

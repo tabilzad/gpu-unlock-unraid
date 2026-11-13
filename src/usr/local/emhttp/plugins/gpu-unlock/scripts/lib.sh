@@ -34,6 +34,10 @@ TARGETS_FILE="$FLASH_DIR/targets"
 HOOK_STATUS="$RUN_DIR/hook.status"
 FIRMWARE_LOG="$RUN_DIR/firmware.log"
 FIRMWARE_PID="$RUN_DIR/firmware.pid"
+FIRMWARE_RC="$RUN_DIR/firmware.rc"
+FIRMWARE_STAMP="$RUN_DIR/firmware.verified"
+RETRY_PID="$RUN_DIR/retry.pid"
+RETRY_LOG="$RUN_DIR/retry.log"
 KERNEL_LOG_SNAPSHOT="$RUN_DIR/kernel.log"
 NOTIFY_BIN="$ROOT/usr/local/emhttp/webGui/scripts/notify"
 UPDATE_CRON_BIN="$ROOT/usr/local/sbin/update_cron"
@@ -71,22 +75,20 @@ UPSTREAM_REF=$(env_get UPSTREAM_REF)
 # Makefile at UPSTREAM_REF); a set that lacks any of them counts as incomplete.
 FIRMWARE_FILES=$(env_get FIRMWARE_FILES)
 # Device ids the module accepts (cards[] in upstream kernel/gpu_unlock/recipes.c
-# at UPSTREAM_REF), one family per line: TU102, TU104, TU106 (Turing), GA102,
-# GA103, GA104, GA106 (Ampere), AD102, AD103, AD104, AD106, AD107 (Ada Lovelace).
-# Upstream marks Turing and Ada experimental.
-SUPPORTED_IDS="1e03 1e04 1e07 1e2d 1e2e
-1e81 1e82 1e84 1e87 1e89 1ec2 1ec7
-1f02 1f03 1f06 1f07 1f08 1f42 1f47
-2200 2203 2204 2205 2206 2207 2208 220a 220d 2216 222b 222f
-2414
-2480 2482 2483 2484 2486 2487 2488 2489 248a 248c 248d 248e 249c 249d 249f 24a0
-24a4 24ac 24ad 24af 24bf 24c0 24c7 24c8 24c9 24dc 24dd 24df 24e0
-2501 2503 2504 2505 2507 2508 2509 252f 2544
-2684 2685 2689
-2702 2704 2705 2709 2757
-2782 2783 2786
-2803 2805
-2882 28a0 28e0 28e1"
+# at UPSTREAM_REF), one chip per line with its name first: Turing (TU), Ampere
+# (GA) and Ada Lovelace (AD). Upstream marks Turing and Ada experimental.
+SUPPORTED_CHIPS="TU102 1e03 1e04 1e07 1e2d 1e2e
+TU104 1e81 1e82 1e84 1e87 1e89 1ec2 1ec7
+TU106 1f02 1f03 1f06 1f07 1f08 1f42 1f47
+GA102 2200 2203 2204 2205 2206 2207 2208 220a 220d 2216 222b 222f
+GA103 2414
+GA104 2480 2482 2483 2484 2486 2487 2488 2489 248a 248c 248d 248e 249c 249d 249f 24a0 24a4 24ac 24ad 24af 24bf 24c0 24c7 24c8 24c9 24dc 24dd 24df 24e0
+GA106 2501 2503 2504 2505 2507 2508 2509 252f 2544
+AD102 2684 2685 2689
+AD103 2702 2704 2705 2709 2757
+AD104 2782 2783 2786
+AD106 2803 2805
+AD107 2882 28a0 28e0 28e1"
 
 # ---------------------------------------------------------------------------
 # Logging and notifications
@@ -179,17 +181,40 @@ firmware_missing() {
   done
 }
 
-# firmware_state: present, missing, incomplete (a set that lacks files, as one
-# generated for an earlier gpu_unlock does) or damaged (checksums fail).
+# firmware_fingerprint: the names, sizes and times of the firmware files plus
+# the checksum list itself; it changes whenever the set on the flash drive does.
+firmware_fingerprint() {
+  {
+    find "$FIRMWARE_DIR" -type f -printf '%P %s %T@\n' 2>/dev/null | LC_ALL=C sort
+    cat "$FIRMWARE_DIR/SHA256SUMS" 2>/dev/null
+  } | sha256sum | cut -d' ' -f1
+}
+
+# firmware_state [quick]: present, missing, incomplete (a set that lacks files,
+# as one generated for an earlier gpu_unlock does) or damaged (checksums fail).
+# Verifying means reading about 110 MB from the flash drive. With "quick" (the
+# settings page, which asks every few seconds while it follows a job) a set
+# that verified earlier this boot and has the same fingerprint since is taken
+# as present; everything else (check, the boot hook) verifies in full.
 firmware_state() {
+  local print
   if [ ! -d "$FIRMWARE_DIR/gpu-unlock/$NV" ] && [ ! -r "$FIRMWARE_DIR/SHA256SUMS" ]; then
     echo missing
   elif [ -n "$(firmware_missing)" ] || [ "$(cat "$FIRMWARE_DIR/VERSION" 2>/dev/null)" != "$NV" ]; then
     echo incomplete
-  elif [ ! -r "$FIRMWARE_DIR/SHA256SUMS" ] || ! (cd "$FIRMWARE_DIR" && sha256sum -c SHA256SUMS >/dev/null 2>&1); then
+  elif [ ! -r "$FIRMWARE_DIR/SHA256SUMS" ]; then
     echo damaged
   else
-    echo present
+    print=$(firmware_fingerprint)
+    if [ "${1:-}" = quick ] && [ "$(cat "$FIRMWARE_STAMP" 2>/dev/null)" = "$print" ]; then
+      echo present
+    elif (cd "$FIRMWARE_DIR" && sha256sum -c SHA256SUMS >/dev/null 2>&1); then
+      { mkdir -p "$RUN_DIR" && printf '%s\n' "$print" >"$FIRMWARE_STAMP"; } 2>/dev/null || true
+      echo present
+    else
+      rm -f "$FIRMWARE_STAMP" 2>/dev/null
+      echo damaged
+    fi
   fi
 }
 
@@ -320,9 +345,47 @@ card_driver() {
   basename "$(readlink "$SYS_PCI/$1/driver" 2>/dev/null)" 2>/dev/null
 }
 
-# nvidia_cards: one line per NVIDIA display controller: ADDRESS DEVICE DRIVER SUPPORTED
+# card_chip ID: the chip behind a device id the module accepts (GA102 ...);
+# fails without output for any other id.
+card_chip() {
+  local chip ids
+  while read -r chip ids; do
+    case " $ids " in
+      *" $1 "*)
+        printf '%s' "$chip"
+        return 0
+        ;;
+    esac
+  done <<<"$SUPPORTED_CHIPS"
+  return 1
+}
+
+# card_name ADDRESS DEVICE: the model name, from the NVIDIA driver when it
+# drives the card, otherwise from the PCI id database; empty when neither
+# knows the card.
+card_name() {
+  local name db id=${2#0x}
+  name=$(sed -n 's/^Model:[[:space:]]*//p' "$ROOT/proc/driver/nvidia/gpus/$1/information" 2>/dev/null | head -n 1)
+  if [ -z "$name" ]; then
+    for db in "$ROOT/usr/share/hwdata/pci.ids" "$ROOT/usr/share/pci.ids" "$ROOT/usr/share/misc/pci.ids"; do
+      [ -r "$db" ] || continue
+      # Device lines of the 10de block: one tab, the id, two spaces, the name.
+      name=$(awk -v id="$id" '
+        /^10de[[:space:]]/ { vendor = 1; next }
+        /^[0-9a-f]/ { vendor = 0 }
+        vendor && $1 == id && /^[[:space:]][0-9a-f]/ { sub(/^[[:space:]]+[0-9a-f]+[[:space:]]+/, ""); print; exit }' "$db" 2>/dev/null)
+      # "GA102 [GeForce RTX 3090]" reads better as the part in brackets.
+      case "$name" in *\[*\]) name=${name##*\[} name=${name%\]} ;; esac
+      [ -z "$name" ] || break
+    done
+  fi
+  printf '%s' "$name"
+}
+
+# nvidia_cards: one line per NVIDIA display controller:
+# ADDRESS DEVICE DRIVER SUPPORTED CHIP   (CHIP is - for a card the module does not accept)
 nvidia_cards() {
-  local dev vendor class device drv id supported
+  local dev vendor class device drv chip supported
   for dev in "$SYS_PCI"/*; do
     [ -d "$dev" ] || continue
     vendor=$(cat "$dev/vendor" 2>/dev/null)
@@ -331,10 +394,10 @@ nvidia_cards() {
     case "$class" in 0x0300* | 0x0302*) ;; *) continue ;; esac
     device=$(cat "$dev/device" 2>/dev/null)
     drv=$(card_driver "$(basename "$dev")")
-    id=${device#0x}
     supported=no
-    case " $(printf '%s' "$SUPPORTED_IDS" | tr '\n' ' ') " in *" $id "*) supported=yes ;; esac
-    printf '%s %s %s %s\n' "$(basename "$dev")" "$device" "${drv:-none}" "$supported"
+    chip=-
+    if chip=$(card_chip "${device#0x}"); then supported=yes; else chip=-; fi
+    printf '%s %s %s %s %s\n' "$(basename "$dev")" "$device" "${drv:-none}" "$supported" "$chip"
   done
 }
 
