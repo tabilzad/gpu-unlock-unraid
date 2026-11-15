@@ -31,6 +31,11 @@ ENV_FILE="$EMHTTP_DIR/$PLUGIN.env"
 CRON_FILE="$FLASH_DIR/$PLUGIN.cron"
 DISABLED_MARKER="$FLASH_DIR/disabled"
 TARGETS_FILE="$FLASH_DIR/targets"
+# One marker per card the hook holds back after an unlock that kept the card
+# (the NVIDIA driver cannot load such a card), and the chips the pinned
+# gpu_unlock is known to fail on, both read by the hook at boot.
+HELD_DIR="$FLASH_DIR/held"
+KNOWN_BAD_FILE="$FLASH_DIR/known-bad"
 HOOK_STATUS="$RUN_DIR/hook.status"
 FIRMWARE_LOG="$RUN_DIR/firmware.log"
 FIRMWARE_PID="$RUN_DIR/firmware.pid"
@@ -74,6 +79,12 @@ UPSTREAM_REF=$(env_get UPSTREAM_REF)
 # The files the module loads from gpu-unlock/$NV/ (FIRMWARE_FILES in upstream's
 # Makefile at UPSTREAM_REF); a set that lacks any of them counts as incomplete.
 FIRMWARE_FILES=$(env_get FIRMWARE_FILES)
+# Chips the pinned gpu_unlock is known to fail on (KNOWN_BAD_CHIPS in
+# versions.env, with the reason and the upstream issue); the hook leaves such
+# cards alone and the page says why.
+KNOWN_BAD_CHIPS=$(env_get KNOWN_BAD_CHIPS)
+KNOWN_BAD_NOTE=$(env_get KNOWN_BAD_NOTE)
+KNOWN_BAD_URL=$(env_get KNOWN_BAD_URL)
 # Device ids the module accepts (cards[] in upstream kernel/gpu_unlock/recipes.c
 # at UPSTREAM_REF), one chip per line with its name first: Turing (TU), Ampere
 # (GA) and Ada Lovelace (AD). Upstream marks Turing and Ada experimental.
@@ -271,65 +282,141 @@ effective_targets() {
   printf '%s' "$t"
 }
 
-# target_cards: one address per line; "all" expanded to the supported cards present.
+# target_cards: one address per line, the cards the hook actually hands to the
+# module: "all" expanded to the supported cards present, minus the cards the
+# hook leaves alone (held back after an unlock that kept the card, or a chip
+# the pinned gpu_unlock is known to fail on).
 target_cards() {
-  local t line
+  local t line cards held addr
   t=$(effective_targets)
   [ -n "$t" ] || return 0
-  if [ "$t" = all ]; then
-    while read -r line; do
-      [ -n "$line" ] || continue
-      # shellcheck disable=SC2086 # the line is four space-separated fields
-      set -- $line
-      [ "$4" = yes ] && echo "$1"
-    done < <(nvidia_cards)
-  else
-    printf '%s\n' "$t" | tr ',' '\n'
+  cards=$(nvidia_cards)
+  held=$(held_cards | cut -d'|' -f1 | tr '\n' ' ')
+  while read -r line; do
+    [ -n "$line" ] || continue
+    # shellcheck disable=SC2086 # the line is five space-separated fields
+    set -- $line
+    if [ "$t" = all ]; then
+      [ "$4" = yes ] || continue
+    else
+      case ",$t," in *",$1,"*) ;; *) continue ;; esac
+    fi
+    case " $held " in *" $1 "*) continue ;; esac
+    [ "$5" = - ] || ! chip_known_bad "$5" || continue
+    echo "$1"
+  done <<<"$cards"
+  # Chosen addresses with no card behind them stay listed, so the page can say so.
+  if [ "$t" != all ]; then
+    for addr in ${t//,/ }; do
+      case $'\n'"$cards"$'\n' in *$'\n'"$addr "*) ;; *) echo "$addr" ;; esac
+    done
   fi
 }
 
-# card_verdict ADDRESS: "STATE|REASON|POWER_OFF" from this boot's kernel log.
-# STATE is unlocked, failed, skipped (no supported card at the address, or a
-# card another driver held at boot) or pending; POWER_OFF is yes when the module
-# said the card needs a power cycle (WPR2 already up, or firmware that did not stop).
+# card_verdict ADDRESS: "STATE|REASON|POWER_OFF|BLOCKED" from this boot's
+# kernel log. STATE is unlocked, failed, skipped (no supported card at the
+# address, or a card another driver held at boot) or pending. POWER_OFF is yes
+# when the module refused a card the driver had already started since power
+# on (WPR2 up): a full power off fixes that. BLOCKED is yes when the unlock
+# failed half-way and the module kept the card ("handover refused", "firmware
+# did not stop"): the NVIDIA driver cannot load it this boot, and the hook
+# holds the card back from the next one.
 card_verdict() {
   local pci=$1 lines mine reason drv
   lines=$(kernel_log_lines)
   mine=$(printf '%s\n' "$lines" | grep -F "pci $pci: " || true)
   if printf '%s\n' "$mine" | grep -q 'gpu_unlock: unlocked$'; then
-    printf 'unlocked||no\n'
-  elif printf '%s\n' "$mine" | grep -q 'power off'; then
-    reason=$(printf '%s\n' "$mine" | grep 'power off' | head -n 1 | sed "s/.*pci $pci: //")
-    printf 'failed|%s|yes\n' "$reason"
+    printf 'unlocked||no|no\n'
+  elif printf '%s\n' "$mine" | grep -q 'power off first'; then
+    reason=$(printf '%s\n' "$mine" | grep 'power off first' | head -n 1 | sed "s/.*pci $pci: //")
+    printf 'failed|%s|yes|no\n' "$reason"
+  elif printf '%s\n' "$mine" | grep -q -E 'retained until power off|firmware did not stop'; then
+    reason=$(printf '%s\n' "$mine" | grep -o 'gpu_unlock: unlock failed ([-0-9]*)' | head -n 1)
+    printf 'failed|%s; the module kept the card, so the NVIDIA driver could not load it this boot|no|yes\n' "${reason#gpu_unlock: }"
   elif reason=$(printf '%s\n' "$mine" | grep -o 'gpu_unlock: firmware load failed ([-0-9]*)' | head -n 1) && [ -n "$reason" ]; then
-    printf 'failed|%s|no\n' "${reason#gpu_unlock: }"
+    printf 'failed|%s|no|no\n' "${reason#gpu_unlock: }"
   elif reason=$(printf '%s\n' "$mine" | grep -o 'gpu_unlock: unlock failed ([-0-9]*)' | head -n 1) && [ -n "$reason" ]; then
     # -EBUSY with no WPR2 line: a driver held the card when the module ran
     # (vfio-pci for a VM, which "all" does not avoid). Deliberate, not a failure.
     drv=$(card_driver "$pci")
     if [ "$reason" = 'gpu_unlock: unlock failed (-16)' ] && [ -n "$drv" ] && [ "$drv" != nvidia ]; then
-      printf 'skipped|bound to %s at boot|no\n' "$drv"
+      printf 'skipped|bound to %s at boot|no|no\n' "$drv"
     else
-      printf 'failed|%s|no\n' "${reason#gpu_unlock: }"
+      printf 'failed|%s|no|no\n' "${reason#gpu_unlock: }"
     fi
   elif printf '%s\n' "$lines" | grep -qF "no supported card at \"$pci\""; then
-    printf 'skipped|no supported card at this address|no\n'
+    printf 'skipped|no supported card at this address|no|no\n'
   else
-    printf 'pending|no result in the kernel log|no\n'
+    printf 'pending|no result in the kernel log|no|no\n'
   fi
 }
 
-# verdicts: one line per target card: ADDRESS|STATE|REASON|POWER_OFF
+# boot_targets: the cards the hook handed to the module this boot, from the
+# targets= in its status line (a card held back during this boot still gets
+# this boot's verdict); before the hook ran, the cards of the next boot.
+boot_targets() {
+  local s t
+  s=$(cat "$HOOK_STATUS" 2>/dev/null)
+  t=""
+  case "$s" in
+    loaded:*) t=$(printf '%s' "$s" | sed -n 's/.*targets=\([^ ;]*\).*/\1/p') ;;
+  esac
+  if [ "$t" = all ]; then
+    nvidia_cards | awk '$4 == "yes" { print $1 }'
+  elif [ -n "$t" ]; then
+    printf '%s\n' "$t" | tr ',' '\n'
+  else
+    target_cards
+  fi
+}
+
+# verdicts: one line per card of this boot: ADDRESS|STATE|REASON|POWER_OFF|BLOCKED
 verdicts() {
   local pci
   while read -r pci; do
     [ -n "$pci" ] || continue
     printf '%s|%s\n' "$pci" "$(card_verdict "$pci")"
-  done < <(target_cards)
+  done < <(boot_targets)
 }
 
 power_off_required() {
   verdicts | awk -F '|' '$4 == "yes" { found = 1 } END { exit !found }'
+}
+
+# nvidia_blocked: a card's failed unlock kept the card this boot.
+nvidia_blocked() {
+  verdicts | awk -F '|' '$5 == "yes" { found = 1 } END { exit !found }'
+}
+
+# chip_known_bad CHIP: the pinned gpu_unlock is known to fail on this chip.
+chip_known_bad() {
+  case " $KNOWN_BAD_CHIPS " in *" $1 "*) return 0 ;; esac
+  return 1
+}
+
+# known_bad_ids: the device ids of the known-bad chips, space separated.
+known_bad_ids() {
+  local chip ids out=""
+  while read -r chip ids; do
+    chip_known_bad "$chip" && out="$out $ids"
+  done <<<"$SUPPORTED_CHIPS"
+  printf '%s' "${out# }"
+}
+
+# held_cards: one line per card the hook holds back: ADDRESS|KERNEL|REASON.
+# A marker written for another gpu_unlock version is stale (a new version
+# gets a fresh try) and is dropped here as the hook drops it at boot.
+held_cards() {
+  local f addr
+  for f in "$HELD_DIR"/*; do
+    [ -f "$f" ] || continue
+    addr=$(basename "$f")
+    if [ "$(sed -n 's/^module_version=//p' "$f" 2>/dev/null | head -n 1)" != "$MODULE_VERSION" ]; then
+      rm -f "$f"
+      continue
+    fi
+    printf '%s|%s|%s\n' "$addr" "$(sed -n 's/^kernel=//p' "$f" | head -n 1)" "$(sed -n 's/^reason=//p' "$f" | head -n 1 | tr -d '|')"
+  done
 }
 
 safe_mode() {

@@ -259,21 +259,81 @@ cat >"$ROOT/var/log/dmesg" <<'EOF'
 EOF
 ctl status --json >"$out"
 assert "json: unlocked verdict" check_json 'any(v["address"] == "0000:01:00.0" and v["state"] == "unlocked" and v["power_off"] is False for v in d["verdicts"])'
-assert "json: power-off verdict with reason" check_json 'any(v["address"] == "0000:03:00.0" and v["state"] == "failed" and v["power_off"] is True and "until power off" in v["reason"] for v in d["verdicts"])'
-assert "json: power_off_required" check_json 'd["power_off_required"] is True'
+# The module kept the card: the NVIDIA driver cannot load it this boot.
+assert "json: a kept card is a blocked failure, not a power-off case" check_json 'any(v["address"] == "0000:03:00.0" and v["state"] == "failed" and v["blocked"] is True and v["power_off"] is False and v["reason"] == "unlock failed (-5); the module kept the card, so the NVIDIA driver could not load it this boot" for v in d["verdicts"])'
+assert "json: nvidia_blocked, no power off" check_json 'd["nvidia_blocked"] is True and d["power_off_required"] is False'
 : >"$ROOT/notify.log"
 rm -f "$ROOT/run/gpu-unlock/notified-report"
 assert_rc "report" 0 ctl report
-assert_grep "report: alert on power off" 'power off required' "$ROOT/notify.log"
+assert_grep "report: alert on the blocked driver" 'unlock failed and the NVIDIA driver could not load' "$ROOT/notify.log"
+assert_grep "report: says the card is held back" 'held back from the next boot' "$ROOT/notify.log"
 ctl report >/dev/null
-assert "report: once per boot" test "$(grep -c 'power off required' "$ROOT/notify.log")" = 1
+assert "report: once per boot" test "$(grep -c 'NVIDIA driver could not load' "$ROOT/notify.log")" = 1
+ctl status >"$out"
+assert_grep "status text: blocked verdict" '0000:03:00.0: failed (unlock failed (-5); the module kept the card.*NVIDIA DRIVER BLOCKED' "$out"
 cat >"$ROOT/var/log/dmesg" <<'EOF'
 [   41.199010] pci 0000:03:00.0: card already initialised since power on (WPR2 enabled); power off first
 [   41.199020] pci 0000:03:00.0: gpu_unlock: unlock failed (-16)
 [   41.201337] pci 0000:01:00.0: gpu_unlock: unlocked
 EOF
 ctl status --json >"$out"
-assert "json: WPR2 verdict" check_json 'any(v["address"] == "0000:03:00.0" and v["power_off"] is True and "WPR2" in v["reason"] for v in d["verdicts"])'
+assert "json: WPR2 verdict" check_json 'any(v["address"] == "0000:03:00.0" and v["power_off"] is True and v["blocked"] is False and "WPR2" in v["reason"] for v in d["verdicts"])'
+assert "json: power_off_required" check_json 'd["power_off_required"] is True and d["nvidia_blocked"] is False'
+: >"$ROOT/notify.log"
+rm -f "$ROOT/run/gpu-unlock/notified-report"
+ctl report >/dev/null
+assert_grep "report: alert on power off" 'power off required' "$ROOT/notify.log"
+ctl report >/dev/null
+assert "report: once per boot" test "$(grep -c 'power off required' "$ROOT/notify.log")" = 1
+
+echo "ctl: held-back cards and chips the module is known to fail on"
+fake_card 0000:04:00.0 0x1e07 nvidia
+ctl status --json >"$out"
+assert "json: a Turing card is known bad" check_json 'any(c["address"] == "0000:04:00.0" and c["chip"] == "TU102" and c["supported"] is True and c["known_bad"] is True for c in d["cards"])'
+assert "json: the Ampere card is not" check_json 'any(c["address"] == "0000:01:00.0" and c["known_bad"] is False and c["held"] is False for c in d["cards"])'
+assert "json: the note names the fix and the issue" check_json 'd["known_bad_chips"] == "TU102 TU104 TU106" and "294" in d["known_bad_note"] and d["known_bad_url"].startswith("https://github.com/Zagitta/gpu-unlock/issues/")'
+assert "json: a known-bad card gets no verdict under all" check_json 'not any(v["address"] == "0000:04:00.0" for v in d["verdicts"])'
+assert_rc "targets set refuses a known-bad card" 1 ctl targets set 0000:04:00.0
+ctl targets set 0000:04:00.0 2>"$out" || true
+assert_grep "and says why" "is a TU102 card, and gpu_unlock $MV fails on Turing" "$out"
+ctl status >"$out"
+assert_grep "status text flags the chip" 'chip=TU102.*KNOWN TO FAIL with gpu_unlock' "$out"
+ctl hook-install >/dev/null
+assert_grep "hook-install writes the ids for the hook" '^ids=.*1e07' "$FLASH/known-bad"
+assert_grep "keyed to the module version" "^module_version=$MV\$" "$FLASH/known-bad"
+mkdir -p "$FLASH/held"
+printf 'module_version=%s\nkernel=6.18.58-Unraid\nreason=unlock failed (-19); the module kept the card\n' "$MV" >"$FLASH/held/0000:03:00.0"
+printf 'module_version=0.1.0\nkernel=old\nreason=old\n' >"$FLASH/held/0000:01:00.0"
+ctl status --json >"$out"
+assert "json: the held card is listed" check_json 'd["held"] == [{"address": "0000:03:00.0", "kernel": "6.18.58-Unraid", "reason": "unlock failed (-19); the module kept the card"}]'
+assert "json: and flagged among the cards" check_json 'any(c["address"] == "0000:03:00.0" and c["held"] is True for c in d["cards"])'
+assert "json: a held card gets no verdict" check_json 'not any(v["address"] == "0000:03:00.0" for v in d["verdicts"])'
+assert "a marker of another module version is dropped" test ! -e "$FLASH/held/0000:01:00.0"
+# The boot in which the hook wrote the marker: the card still gets its verdict.
+printf 'loaded: gpu_unlock for 6.18.58-Unraid, targets=0000:01:00.0,0000:03:00.0 (from the settings page); per-card result in the kernel log; the unlock kept 0000:03:00.0, held back from the next boot so the NVIDIA driver loads again\n' >"$ROOT/run/gpu-unlock/hook.status"
+cat >"$ROOT/var/log/dmesg" <<'EOF'
+[   35.801076] pci 0000:03:00.0: handover refused: incomplete transaction; BME_off=1 command=0x102 config_result=0; BAR ownership and DMA buffers retained until power off
+[   35.832772] pci 0000:03:00.0: gpu_unlock: unlock failed (-19)
+[   35.900000] pci 0000:01:00.0: gpu_unlock: unlocked
+EOF
+ctl status --json >"$out"
+assert "json: a card held back during this boot keeps this boot's verdict" check_json 'any(v["address"] == "0000:03:00.0" and v["blocked"] is True for v in d["verdicts"]) and d["nvidia_blocked"] is True'
+assert "json: the targets of the hook's status line decide the verdicts" check_json 'sorted(v["address"] for v in d["verdicts"]) == ["0000:01:00.0", "0000:03:00.0"]'
+printf 'loaded: gpu_unlock for 6.18.58-Unraid\n' >"$ROOT/run/gpu-unlock/hook.status"
+ctl status >"$out"
+assert_grep "status text: held back section" '=== held back' "$out"
+assert_rc "release rejects a malformed address" 1 ctl targets release 'x;y'
+assert_rc "release" 0 ctl targets release 0000:03:00.0
+assert "the marker is gone" test ! -e "$FLASH/held/0000:03:00.0"
+printf 'module_version=%s\nkernel=k\nreason=r\n' "$MV" >"$FLASH/held/0000:03:00.0"
+assert_rc "release all" 0 ctl targets release all
+assert "every marker is gone" test -z "$(ls -A "$FLASH/held")"
+rm -rf "$ROOT/sys/bus/pci/devices/0000:04:00.0"
+cat >"$ROOT/var/log/dmesg" <<'EOF'
+[   41.199010] pci 0000:03:00.0: card already initialised since power on (WPR2 enabled); power off first
+[   41.199020] pci 0000:03:00.0: gpu_unlock: unlock failed (-16)
+[   41.201337] pci 0000:01:00.0: gpu_unlock: unlocked
+EOF
 cat >"$ROOT/var/log/dmesg" <<'EOF'
 [   41.101000] pci 0000:03:00.0: Direct firmware load for gpu-unlock/610.43.03/gsp_ga10x.bin failed with error -2
 [   41.101010] pci 0000:03:00.0: gpu_unlock: firmware load failed (-2)

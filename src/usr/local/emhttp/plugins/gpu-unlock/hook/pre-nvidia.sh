@@ -101,9 +101,97 @@ if [ ! -d "$FWROOT/gpu-unlock" ]; then
     fi
 fi
 
+MV=$(sed -n 's/^module_version=//p' "$KDIR/manifest.txt" 2>/dev/null | head -n 1)
+
+# nvidia_cards: ADDRESS DEVICE of every NVIDIA display controller present.
+nvidia_cards() {
+    for d in "$R"/sys/bus/pci/devices/*; do
+        [ "$(cat "$d/vendor" 2>/dev/null)" = 0x10de ] || continue
+        case "$(cat "$d/class" 2>/dev/null)" in 0x0300* | 0x0302*) ;; *) continue ;; esac
+        printf '%s %s\n' "$(basename "$d")" "$(cat "$d/device" 2>/dev/null)"
+    done
+}
+# target_list: the chosen cards as addresses, "all" resolved to the cards present.
+target_list() {
+    if [ "$TARGETS" = all ]; then nvidia_cards | cut -d' ' -f1; else printf '%s\n' "$TARGETS" | tr ',' '\n'; fi
+}
+# klog: this boot's kernel log (the test suite provides a file).
+klog() {
+    if [ -n "$R" ]; then cat "$R/var/log/dmesg" 2>/dev/null; else dmesg 2>/dev/null; fi
+}
+
+# Cards this gpu_unlock leaves alone: those held back after an unlock that
+# kept the card (markers in held/, written below), and the chips it is known
+# to fail on (known-bad, written by gpu-unlock-ctl hook-install). Both are
+# keyed to the module version, so a new gpu_unlock gets a fresh try.
+HELD=
+for f in "$BASE"/held/*; do
+    [ -f "$f" ] || continue
+    if [ "$(sed -n 's/^module_version=//p' "$f" | head -n 1)" = "$MV" ]; then
+        HELD="$HELD $(basename "$f")"
+    else
+        rm -f "$f"
+    fi
+done
+BAD_IDS=
+if [ -r "$BASE/known-bad" ] && [ "$(sed -n 's/^module_version=//p' "$BASE/known-bad" | head -n 1)" = "$MV" ]; then
+    BAD_IDS=$(sed -n 's/^ids=//p' "$BASE/known-bad" | head -n 1)
+fi
+if [ -n "$HELD$BAD_IDS" ]; then
+    KEEP=
+    LEFT=
+    for addr in $(target_list); do
+        case " $HELD " in
+            *" $addr "*)
+                log "holding back $addr: $(sed -n 's/^reason=//p' "$BASE/held/$addr" | head -n 1) (Settings, GPU Unlock: Try again)"
+                LEFT="$LEFT $addr"
+                continue
+                ;;
+        esac
+        id=$(nvidia_cards | awk -v a="$addr" '$1 == a { sub(/^0x/, "", $2); print $2 }')
+        if [ -n "$id" ] && [ -n "$BAD_IDS" ]; then
+            case " $BAD_IDS " in
+                *" $id "*)
+                    log "leaving $addr alone: gpu_unlock $MV is known to fail on this chip and would block the NVIDIA driver (gpu-unlock-ctl status)"
+                    LEFT="$LEFT $addr"
+                    continue
+                    ;;
+            esac
+        fi
+        KEEP="$KEEP,$addr"
+    done
+    if [ -z "$KEEP" ]; then
+        status "skipped: every chosen card is held back or known to fail with gpu_unlock $MV:$LEFT (Settings, GPU Unlock)"; exit 0
+    fi
+    if [ "$TARGETS" != all ] || [ -n "$LEFT" ]; then
+        TARGETS=${KEEP#,}
+    fi
+    [ -z "$LEFT" ] || SOURCE="$SOURCE; left alone:$LEFT"
+fi
+
 log "loading gpu_unlock for $KVER with targets=$TARGETS (from $SOURCE) before nvidia"
-if /sbin/insmod "$KDIR/gpu_unlock.ko" "targets=$TARGETS"; then
-    status "loaded: gpu_unlock for $KVER, targets=$TARGETS (from $SOURCE); per-card result in the kernel log"
+# GPU_UNLOCK_INSMOD: test suite only.
+if "${GPU_UNLOCK_INSMOD:-/sbin/insmod}" "$KDIR/gpu_unlock.ko" "targets=$TARGETS"; then
+    # A card whose unlock failed half-way is kept by the module ("handover
+    # refused", "firmware did not stop"), and the NVIDIA driver cannot load it
+    # this boot. Hold it back from the next boot so the driver works again;
+    # the page offers a retry, and a new gpu_unlock drops the marker itself.
+    KEPT=
+    for addr in $(target_list); do
+        mine=$(klog | grep -F "pci $addr: ")
+        if printf '%s\n' "$mine" | grep -q -E 'retained until power off|firmware did not stop'; then
+            err=$(printf '%s\n' "$mine" | grep -o 'gpu_unlock: unlock failed ([-0-9]*)' | head -n 1)
+            mkdir -p "$BASE/held" 2>/dev/null
+            printf 'module_version=%s\nkernel=%s\nreason=%s\n' "$MV" "$KVER" \
+                "${err#gpu_unlock: }; the module kept the card and the NVIDIA driver could not load it" > "$BASE/held/$addr" 2>/dev/null
+            KEPT="$KEPT $addr"
+        fi
+    done
+    if [ -n "$KEPT" ]; then
+        status "loaded: gpu_unlock for $KVER, targets=$TARGETS (from $SOURCE); per-card result in the kernel log; the unlock kept$KEPT, held back from the next boot so the NVIDIA driver loads again"
+    else
+        status "loaded: gpu_unlock for $KVER, targets=$TARGETS (from $SOURCE); per-card result in the kernel log"
+    fi
 else
     status "failed: insmod gpu_unlock.ko with targets=$TARGETS (from $SOURCE); nvidia loads as usual"
 fi

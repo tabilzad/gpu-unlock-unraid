@@ -39,10 +39,10 @@ lacks() {
 }
 
 mkdir -p "$ROOT/usr/share/hwdata" "$RUN"
-printf '10de  NVIDIA Corporation\n\t1e04  TU102 [GeForce RTX 2080 Ti]\n\t2204  GA102 [GeForce RTX 3090]\n\t\t10de 147d  a subsystem line\n10df  Emulex Corporation\n\t2204  not this one\n' >"$ROOT/usr/share/hwdata/pci.ids"
+printf '10de  NVIDIA Corporation\n\t1e04  TU102 [GeForce RTX 2080 Ti]\n\t2204  GA102 [GeForce RTX 3090]\n\t\t10de 147d  a subsystem line\n\t2684  AD102 [GeForce RTX 4090]\n10df  Emulex Corporation\n\t2204  not this one\n' >"$ROOT/usr/share/hwdata/pci.ids"
 fake_card 0000:01:00.0 0x2204 nvidia
 fake_card 0000:02:00.0 0x1234
-fake_card 0000:03:00.0 0x1e04 vfio-pci
+fake_card 0000:03:00.0 0x2684 vfio-pci
 
 echo "page: a fresh install"
 assert_rc "the page renders" 0 render white-bannered
@@ -59,7 +59,7 @@ has "the boot rule step offers the install" '<span>Install boot rule</span>'
 has "card name from the PCI id database" '<div class="gu-card-name">GeForce RTX 3090</div>'
 has "address and device id" '<span class="gu-mono">0000:01:00.0</span><span class="gu-mono">10de:2204</span>'
 has "an unsupported card is listed without a box" '<span class="gu-badge" data-tone="neutral" title="gpu_unlock'
-has "Turing is marked experimental" 'data-tone="warn" title="Upstream marks Turing'
+has "Ada is marked experimental" 'data-tone="warn" title="Upstream marks Turing'
 has "a card held by vfio-pci says so" '>vfio-pci</span>'
 assert "two boxes for two supported cards" test "$(grep -c 'class="gu-pick"' "$html")" = 2
 lacks "nothing is ticked" '" checked'
@@ -125,7 +125,42 @@ printf '[   41.101010] pci 0000:01:00.0: gpu_unlock: firmware load failed (-2)\n
 render
 has "headline: failed" '1 card failed to unlock this boot.'
 has "the reason is next to the card" '<span class="gu-reason">firmware load failed (-2)</span>'
+
+echo "page: the module kept a card and the NVIDIA driver could not load"
+cat >"$ROOT/var/log/dmesg" <<'EOF'
+[   35.801076] pci 0000:01:00.0: handover refused: incomplete transaction; BME_off=1 command=0x102 config_result=0; BAR ownership and DMA buffers retained until power off
+[   35.830495] pci 0000:01:00.0: firmware did not stop; keeping its DMA buffers until power off
+[   35.832772] pci 0000:01:00.0: gpu_unlock: unlock failed (-19)
+[   36.099413] udevd[2792]: Error running install command '/bin/sh /boot/config/plugins/gpu-unlock/pre-nvidia.sh; /sbin/modprobe --ignore-install nvidia ' for module nvidia: retcode 1
+EOF
+render
+has "headline: the driver could not load" '<h2 class="gu-hero-title">1 card failed to unlock and the NVIDIA driver could not load it this boot. It is held back from the next boot: reboot, and the driver loads as usual.</h2>'
+has "this boot tile" '<div class="gu-card-value">Driver blocked</div>'
+has "the card carries the badge" '>NVIDIA driver blocked</span>'
+has "with the reason" '<span class="gu-reason">unlock failed (-19); the module kept the card, so the NVIDIA driver could not load it this boot</span>'
+lacks "no power-off advice" 'Power off required'
+mkdir -p "$FLASH/held"
+printf 'module_version=%s\nkernel=6.18.58-Unraid\nreason=unlock failed (-19); the module kept the card and the NVIDIA driver could not load it\n' "$MV" >"$FLASH/held/0000:01:00.0"
+render
+has "a held-back card says so" '>held back</span>'
+has "and offers a retry" 'data-action="release" data-address="0000:01:00.0"'
+has "a notice explains the hold" '0000:01:00.0 is held back: unlock failed (-19); the module kept the card and the NVIDIA driver could not load it (kernel 6.18.58-Unraid). The boot rule leaves it alone'
+has "the held card is out of the next boot" '<div class="gu-card-sub">no chosen card is left to unlock (held back, or not offered with this gpu_unlock)</div>'
+rm -rf "$FLASH/held"
 printf '[   36.265856] pci 0000:01:00.0: gpu_unlock: unlocked\n' >"$ROOT/var/log/dmesg"
+
+echo "page: a chip this gpu_unlock is known to fail on"
+fake_card 0000:04:00.0 0x1e04 nvidia
+render
+has "the card is marked" ">fails with gpu_unlock $MV</span>"
+has "with the reason as its title" 'data-tone="bad" title="gpu_unlock 2.0.0 fails on Turing'
+lacks "and is not offered" 'value="0000:04:00.0"'
+has "a notice says such cards are left alone" '1 card is not offered, also under &quot;every supported card&quot;: gpu_unlock 2.0.0 fails on Turing'
+endpoint exec POST action=targets targets=0000:04:00.0
+assert_grep "the control tool refuses it" '^http 400$' "$code"
+assert_grep "with the reason" 'is a TU102 card, and gpu_unlock' "$body"
+assert "the saved selection is untouched" test "$(cat "$FLASH/targets")" = 0000:01:00.0
+rm -rf "$ROOT/sys/bus/pci/devices/0000:04:00.0"
 
 echo "page: a staged Unraid update"
 fake_bzimage 6.18.70-Unraid
@@ -233,6 +268,13 @@ assert_grep "targets=all is saved" '^http 200$' "$code"
 assert "the file says all" test "$(cat "$FLASH/targets")" = all
 endpoint exec POST action=targets-clear
 assert "targets-clear removes the file" test ! -e "$FLASH/targets"
+endpoint exec POST action=release address=all%3Brm
+assert_grep "release checks the address" '^http 400$' "$code"
+mkdir -p "$FLASH/held"
+printf 'module_version=%s\nkernel=k\nreason=r\n' "$MV" >"$FLASH/held/0000:01:00.0"
+endpoint exec POST action=release address=0000:01:00.0
+assert_grep "release is accepted" '^http 200$' "$code"
+assert "and the marker is gone" test ! -e "$FLASH/held/0000:01:00.0"
 endpoint exec POST action=targets targets=0000:01:00.0
 endpoint exec POST action=disable
 assert "disable writes the marker" test -e "$FLASH/disabled"

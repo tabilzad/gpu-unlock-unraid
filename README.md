@@ -15,8 +15,13 @@ was already staged on the flash drive at install time had its module fetched in
 advance, and the unlock carried over the reboot. The mechanism is the one
 reported working in [gpu-unlock#55](https://github.com/Zagitta/gpu-unlock/issues/55).
 2.0.0 is the same unlock for Ampere, with the firmware now taken from NVIDIA's
-driver installer; Turing and Ada are new and unconfirmed here. Please report
-what happens on yours.
+driver installer; Ada is new and unconfirmed here. Please report what happens
+on yours. RTX 20 series (Turing) cards are **not offered** with gpu_unlock
+2.0.0: it fails on them (`fwsec:925`, error -19, upstream
+[#242](https://github.com/Zagitta/gpu-unlock/issues/242)) and keeps the card,
+which blocks the NVIDIA driver for the whole boot. Upstream
+[PR #294](https://github.com/Zagitta/gpu-unlock/pull/294) fixes it; the
+plugin offers Turing again once a release carries that fix.
 
 > Not affiliated with NVIDIA, Lime Technology or the gpu-unlock authors.
 > Everything here is GPL-2.0-only. No NVIDIA file is redistributed: the
@@ -178,6 +183,15 @@ unlocked.
   `gpu-unlock-ctl disable` (a marker file; `enable` undoes it). Clearing the
   targets, removing `gpu_unlock.targets=` from the boot entry if you used
   it, or booting Safe Mode also skips it.
+- **A card the module kept**: when an unlock stops half-way, gpu_unlock
+  keeps the card's resources ("handover refused", "firmware did not stop")
+  and the NVIDIA driver cannot load that card for the rest of the boot. The
+  boot rule then holds the card back from the next boot, so the driver
+  works again, and the page says so with the reason and a *Try again*
+  button (`gpu-unlock-ctl targets release ADDR` from a terminal). A new
+  gpu_unlock version is tried by itself. Chips a pinned version is known to
+  fail on (`KNOWN_BAD_CHIPS` in `versions.env`) are left alone from the
+  start, also under "every supported card".
 - **Remove**: uninstall the plugin. The modprobe rule, hook, modules and cron
   job go; the firmware and settings stay under
   `/boot/config/plugins/gpu-unlock` until you delete the directory. Remove the
@@ -190,7 +204,7 @@ unlocked.
 
 ```
 gpu-unlock-ctl status [--json]       what is staged, each card's result this boot, the cards
-gpu-unlock-ctl targets [show | set all|ADDR,... | clear]   the cards to unlock
+gpu-unlock-ctl targets [show | set all|ADDR,... | clear | release ADDR|all]   the cards to unlock; release: try a held-back card again
 gpu-unlock-ctl check [--quiet]       fetch the module for the running and the staged kernel
 gpu-unlock-ctl check --staged        the same for a staged Unraid update only (cron, every minute)
 gpu-unlock-ctl retry                 keep fetching a missing module for an hour (post-install, in the background)
@@ -226,7 +240,7 @@ same fake root in every state it distinguishes, with hostile values in
 everything the control tool reports, and its endpoints are called the way
 php-fpm would. `tests/preview.sh` serves that page from PHP's built-in web
 server with working buttons (scenarios: fresh, ready, unlocked, poweroff,
-staged, firmware); the script that drives the page in the browser has no
+staged, firmware, blocked); the script that drives the page in the browser has no
 automated test, the preview is how it is checked. Releases: tag `vX.Y.Z`; `release.yml` builds the
 package, renders and lints the plg and publishes them. The plugin version shown
 by Unraid is date based (`YYYY.MM.DD.N`), derived from the tag.

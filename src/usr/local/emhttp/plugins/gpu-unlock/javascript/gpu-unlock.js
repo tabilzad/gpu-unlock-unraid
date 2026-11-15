@@ -31,6 +31,7 @@ var gu = {
     'hook-install': ['Boot rule installed', 'Boot rule not installed'],
     'targets': ['Selection saved. It applies at the next boot.', 'Selection not saved'],
     'targets-clear': ['Selection cleared', 'Selection not cleared'],
+    'release': ['The card is tried again at the next boot', 'Not released'],
     'diagnostics': ['Report copied to the clipboard', 'Report not available']
   },
 
@@ -244,7 +245,12 @@ $(function() {
       if (t === '') gu.act('targets-clear', null, this); else gu.act('targets', {targets: t}, this);
       return;
     }
-    gu.act(action, null, this);
+    // The button's other data-* attributes travel with the action (data-address, say).
+    var data = {};
+    $.each(this.attributes, function() {
+      if (this.name.indexOf('data-') === 0 && this.name !== 'data-action') data[this.name.slice(5)] = this.value;
+    });
+    gu.act(action, data, this);
   });
   root.on('click', '[data-refresh]', function() { gu.refresh(); });
   root.on('change', '.gu-pick, #gu-all', gu.sync);

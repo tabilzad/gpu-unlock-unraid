@@ -13,6 +13,9 @@
 #           staged     an Unraid update is staged and its module is missing
 #           firmware   a firmware generation is running (a simulation that
 #                      walks through its phases in half a minute)
+#           blocked    the unlock kept the card and the NVIDIA driver could
+#                      not load; the card is held back, and a Turing card is
+#                      present that this gpu_unlock is known to fail on
 #
 # On the host this starts itself inside the dev image with the port published
 # on 127.0.0.1; inside the image (or wherever php is installed) it runs as is.
@@ -98,8 +101,18 @@ case "$scenario" in
     ) &
     echo $! >"$RUN/firmware.pid"
     ;;
+  blocked)
+    in_place
+    booted
+    fake_card 0000:03:00.0 0x1e04 nvidia
+    rmdir "$ROOT/sys/module/nvidia" 2>/dev/null || true
+    printf '[   35.781138] pci 0000:01:00.0: gpu_unlock: failure unlock_transaction_fwsec:925 error=-19 family=GA102 payload=ga102-v67\n[   35.801076] pci 0000:01:00.0: handover refused: incomplete transaction; BME_off=1 command=0x102 config_result=0; BAR ownership and DMA buffers retained until power off\n[   35.830495] pci 0000:01:00.0: firmware did not stop; keeping its DMA buffers until power off\n[   35.832772] pci 0000:01:00.0: gpu_unlock: unlock failed (-19)\n[   36.099413] udevd[2792]: Error running install command '"'"'/bin/sh /boot/config/plugins/gpu-unlock/pre-nvidia.sh; /sbin/modprobe --ignore-install nvidia '"'"' for module nvidia: retcode 1\n' >"$ROOT/var/log/dmesg"
+    printf 'loaded: gpu_unlock for %s, targets=0000:01:00.0 (from the settings page); per-card result in the kernel log; the unlock kept 0000:01:00.0, held back from the next boot so the NVIDIA driver loads again\n' "$GU_KVER" >"$RUN/hook.status"
+    mkdir -p "$FLASH/held"
+    printf 'module_version=%s\nkernel=%s\nreason=unlock failed (-19); the module kept the card and the NVIDIA driver could not load it\n' "$MV" "$GU_KVER" >"$FLASH/held/0000:01:00.0"
+    ;;
   *)
-    echo "preview: unknown scenario '$scenario' (fresh, ready, unlocked, poweroff, staged, firmware)" >&2
+    echo "preview: unknown scenario '$scenario' (fresh, ready, unlocked, poweroff, staged, firmware, blocked)" >&2
     exit 2
     ;;
 esac

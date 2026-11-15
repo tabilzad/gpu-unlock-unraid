@@ -65,22 +65,37 @@ function gu_model(array $s): array
     $disabled = !empty($s['disabled']);
     $safe = !empty($s['safe_mode']);
     $power_off = !empty($s['power_off_required']);
+    // The module kept a card after a failed unlock: the NVIDIA driver could
+    // not load it this boot, and the hook holds the card back from the next.
+    $blocked = !empty($s['nvidia_blocked']);
+    $known_bad_note = (string) ($s['known_bad_note'] ?? '');
+    $known_bad_url = (string) ($s['known_bad_url'] ?? '');
 
     $verdicts = [];
-    $n = ['unlocked' => 0, 'failed' => 0, 'skipped' => 0, 'pending' => 0];
+    $n = ['unlocked' => 0, 'failed' => 0, 'skipped' => 0, 'pending' => 0, 'blocked' => 0];
     foreach (gu_list($s, 'verdicts') as $v) {
         if (!is_array($v)) {
             continue;
         }
         $verdicts[(string) ($v['address'] ?? '')] = $v;
         $state = (string) ($v['state'] ?? '');
-        $n[isset($n[$state]) ? $state : 'failed']++;
+        $n[isset($n[$state]) && $state !== 'blocked' ? $state : 'failed']++;
+        if (!empty($v['blocked'])) {
+            $n['blocked']++;
+        }
+    }
+    $held = [];
+    foreach (gu_list($s, 'held') as $h) {
+        if (is_array($h) && (string) ($h['address'] ?? '') !== '') {
+            $held[(string) $h['address']] = ['kernel' => (string) ($h['kernel'] ?? ''), 'reason' => (string) ($h['reason'] ?? '')];
+        }
     }
 
     // ---- the cards ---------------------------------------------------------
     $rows = [];
     $present = [];
     $supported = 0;
+    $known_bad_rows = 0;
     foreach (gu_list($s, 'cards') as $c) {
         if (!is_array($c)) {
             continue;
@@ -103,10 +118,13 @@ function gu_model(array $s): array
                 default => ['tone' => 'bad', 'label' => 'failed', 'reason' => $reason],
             };
             $result['power_off'] = !empty($v['power_off']);
+            $result['blocked'] = !empty($v['blocked']);
         } elseif ($hook_ran && $ok) {
-            $result = ['tone' => 'neutral', 'label' => 'not chosen', 'reason' => '', 'power_off' => false];
+            $result = ['tone' => 'neutral', 'label' => 'not chosen', 'reason' => '', 'power_off' => false, 'blocked' => false];
         }
         $name = trim((string) ($c['name'] ?? ''));
+        $known_bad = $ok && !empty($c['known_bad']);
+        $known_bad_rows += $known_bad ? 1 : 0;
         $rows[] = [
             'address' => $addr,
             'name' => $name !== '' ? $name : 'NVIDIA card',
@@ -114,14 +132,22 @@ function gu_model(array $s): array
             'chip' => (string) ($c['chip'] ?? ''),
             'experimental' => !empty($c['experimental']),
             'supported' => $ok,
-            'chosen' => $ok && ($all || in_array($addr, $selected, true)),
+            // Not offered: the pinned gpu_unlock is known to fail on this chip,
+            // and the hook leaves the card alone even under "all".
+            'known_bad' => $known_bad,
+            // Held back by the hook after an unlock that kept the card.
+            'held' => $held[$addr] ?? null,
+            'chosen' => $ok && !$known_bad && ($all || in_array($addr, $selected, true)),
             'driver' => $driver === '' ? 'none' : $driver,
             // A card another driver holds at boot (vfio-pci for a VM) is left alone by the module.
-            'held' => $driver !== '' && $driver !== 'none' && $driver !== 'nvidia',
+            'held_by_driver' => $driver !== '' && $driver !== 'none' && $driver !== 'nvidia',
             'result' => $result,
         ];
     }
     $gone = array_values(array_diff($selected, $present));
+    // The chosen cards the boot rule will hand to the module: not held back,
+    // not a chip this gpu_unlock is known to fail on.
+    $usable = count(array_filter($rows, static fn (array $r): bool => $r['chosen'] && $r['held'] === null));
 
     // ---- is the next boot ready, and if not, what is in the way ------------
     $blocker = '';
@@ -135,6 +161,8 @@ function gu_model(array $s): array
         $blocker = 'the firmware on the flash drive fails its checksums';
     } elseif ($targets === '') {
         $blocker = 'no card is chosen';
+    } elseif ($usable === 0 && $supported > 0) {
+        $blocker = 'no chosen card is left to unlock (held back, or not offered with this gpu_unlock)';
     } elseif ($conflict !== '') {
         $blocker = 'another modprobe rule takes over the nvidia load';
     } elseif (!$rule) {
@@ -146,7 +174,11 @@ function gu_model(array $s): array
     $done_now = $hook_ran && $n['unlocked'] > 0 && $n['pending'] === 0 && $n['failed'] === 0 && !$power_off;
 
     // ---- headline ----------------------------------------------------------
-    if ($power_off) {
+    if ($blocked) {
+        $headline = ['bad', gu_count($n['blocked'], 'card', 'cards') . ' failed to unlock and the NVIDIA driver could not load '
+            . ($n['blocked'] === 1 ? 'it' : 'them') . ' this boot. ' . ($n['blocked'] === 1 ? 'It is' : 'They are')
+            . ' held back from the next boot: reboot, and the driver loads as usual.'];
+    } elseif ($power_off) {
         $headline = ['bad', 'Power off required. Shut the server down, wait a few seconds and power it on; a reboot is not enough for this card.'];
     } elseif ($n['failed'] > 0) {
         $headline = ['bad', gu_count($n['failed'], 'card', 'cards') . ' failed to unlock this boot. The reason is next to the card below.'];
@@ -186,6 +218,14 @@ function gu_model(array $s): array
     if ($gone !== []) {
         $notices[] = ['tone' => 'warn', 'text' => 'The saved selection names ' . implode(', ', $gone) . ', which is not an NVIDIA card in this server (cards change address when they move slots). Tick the cards again and save.'];
     }
+    foreach ($held as $addr => $h) {
+        $notices[] = ['tone' => 'warn', 'text' => "$addr is held back: {$h['reason']}" . ($h['kernel'] !== '' ? " (kernel {$h['kernel']})" : '')
+            . '. The boot rule leaves it alone so the NVIDIA driver loads. It is tried again by itself when a new gpu_unlock is released, or now with Try again next to the card.'];
+    }
+    if ($known_bad_rows > 0 && !$blocked) {
+        $notices[] = ['tone' => 'info', 'text' => gu_count($known_bad_rows, 'card is', 'cards are') . ' not offered, also under "every supported card": '
+            . ($known_bad_note !== '' ? $known_bad_note : "gpu_unlock $mv is known to fail on this chip") . ($known_bad_url !== '' ? " ($known_bad_url)" : '') . '.'];
+    }
     if ($hook === '' && empty($s['nvidia_loaded']) && empty($s['module_loaded'])) {
         $notices[] = ['tone' => 'info', 'text' => 'The NVIDIA driver is not loaded. The unlock runs at the moment it loads, so the Nvidia Driver plugin has to be installed.'];
     }
@@ -195,7 +235,9 @@ function gu_model(array $s): array
     }
 
     // ---- summary cards -----------------------------------------------------
-    if ($power_off) {
+    if ($blocked) {
+        $boot = ['bad', 'Driver blocked', 'the unlock kept a card; held back from the next boot'];
+    } elseif ($power_off) {
         $boot = ['bad', 'Power off', 'required before a card can be unlocked'];
     } elseif ($n['failed'] > 0) {
         $boot = ['bad', $n['failed'] . ' failed', $n['unlocked'] . ' unlocked'];
@@ -219,13 +261,15 @@ function gu_model(array $s): array
         $off = $blocker === 'the unlock is switched off';
         $next = [$off ? 'neutral' : 'warn', $off ? 'Switched off' : 'Not ready', $blocker];
     }
+    // The cards the page offers: supported, and not a chip this gpu_unlock is known to fail on.
+    $offered = $supported - $known_bad_rows;
     if ($supported === 0) {
         $chosen = ['neutral', '0', 'no card gpu_unlock supports was found'];
     } elseif ($targets === '') {
-        $chosen = ['warn', '0 of ' . $supported, 'none chosen yet'];
+        $chosen = ['warn', '0 of ' . $offered, 'none chosen yet'];
     } else {
-        $picked = $all ? $supported : count(array_filter($rows, static fn (array $r): bool => $r['chosen']));
-        $chosen = ['ok', $all ? 'All' : $picked . ' of ' . $supported,
+        $picked = count(array_filter($rows, static fn (array $r): bool => $r['chosen']));
+        $chosen = ['ok', $all ? 'All' : $picked . ' of ' . $offered,
             $locked_by_cmdline ? 'from the kernel command line' : ($all ? 'every supported card' : 'chosen on this page')];
     }
     $tiles = [
@@ -296,6 +340,9 @@ function gu_model(array $s): array
     } elseif ($targets === '') {
         $steps[] = ['key' => 'cards', 'title' => 'Cards', 'tone' => 'warn',
             'text' => $supported > 0 ? 'No card is chosen. Tick the cards to unlock in the list below, then save.' : 'No card that gpu_unlock supports was found in this server.'];
+    } elseif ($usable === 0 && $supported > 0) {
+        $steps[] = ['key' => 'cards', 'title' => 'Cards', 'tone' => 'warn',
+            'text' => 'None of the chosen cards is left to unlock: held back after a failed unlock, or a chip this gpu_unlock is known to fail on. See the list below.'];
     } else {
         $steps[] = ['key' => 'cards', 'title' => 'Cards', 'tone' => $gone === [] ? 'ok' : 'warn',
             'text' => $all ? 'Every supported card is unlocked, also ones added later.' : gu_count(count($selected), 'card', 'cards') . ' chosen: ' . implode(', ', $selected) . '.'];
@@ -318,7 +365,10 @@ function gu_model(array $s): array
             'text' => 'Installed. It runs the unlock right before the NVIDIA driver loads, at every boot, and never holds the driver back.'];
     }
 
-    if ($power_off) {
+    if ($blocked) {
+        $steps[] = ['key' => 'power', 'title' => 'Power cycle', 'tone' => 'bad',
+            'text' => 'The unlock stopped half-way and the module kept the card, so the NVIDIA driver could not load it this boot. Reboot: the card is held back, and the driver loads as usual. The reason is next to the card below.'];
+    } elseif ($power_off) {
         $steps[] = ['key' => 'power', 'title' => 'Power cycle', 'tone' => 'bad',
             'text' => 'A full power off is needed: the card reported that the NVIDIA driver had already started it. NVIDIA drives it locked until then.'];
     } elseif ($n['failed'] > 0) {
@@ -369,6 +419,9 @@ function gu_model(array $s): array
         'steps' => $steps,
         'rows' => $rows,
         'supported' => $supported,
+        'held' => $held,
+        'blocked' => $blocked,
+        'known_bad_note' => $known_bad_note !== '' ? $known_bad_note : "gpu_unlock $mv is known to fail on this chip",
         'targets' => $targets,
         'all' => $all,
         'locked' => $locked_by_cmdline,

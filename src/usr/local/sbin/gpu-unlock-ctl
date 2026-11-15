@@ -10,7 +10,7 @@
 #   gpu-unlock-ctl fetch [KVER] [--force]   download one kernel's module from the GitHub release
 #   gpu-unlock-ctl firmware [--cache DIR] [--background]   generate the firmware with Docker
 #   gpu-unlock-ctl firmware import DIR  take firmware generated elsewhere (gpu-unlock/<nv>/*.bin)
-#   gpu-unlock-ctl targets [show | set all|ADDR,... | clear]   the cards to unlock (settings page writes this)
+#   gpu-unlock-ctl targets [show | set all|ADDR,... | clear | release ADDR|all]   the cards to unlock; release: try a held-back card again
 #   gpu-unlock-ctl enable | disable     keep everything but skip the unlock on the next boots
 #   gpu-unlock-ctl report               notify once per boot what the unlock did (post-install runs it)
 #   gpu-unlock-ctl hook-install         (re)write the modprobe rule, the hook copy and the cron job
@@ -359,6 +359,14 @@ hook_install_cmd() {
     printf '%s\n' "$HOOK_RULE" | atomic_write "$MODPROBE_CONF" 0644 || die "cannot write $MODPROBE_CONF"
     echo "modprobe rule written to $MODPROBE_CONF"
   fi
+  # The chips the pinned gpu_unlock is known to fail on, for the hook (which
+  # has no access to gpu-unlock.env), keyed to the module version.
+  if [ -n "$KNOWN_BAD_CHIPS" ]; then
+    printf 'module_version=%s\nchips=%s\nids=%s\nnote=%s\nurl=%s\n' "$MODULE_VERSION" "$KNOWN_BAD_CHIPS" "$(known_bad_ids)" "$KNOWN_BAD_NOTE" "$KNOWN_BAD_URL" |
+      atomic_write "$KNOWN_BAD_FILE" 0644 || true
+  else
+    rm -f "$KNOWN_BAD_FILE"
+  fi
   printf '%s\n' \
     "# gpu-unlock (installed by the plugin): daily, fetch the module for a new or staged Unraid kernel and check the firmware;" \
     "# every minute, read the kernel version of /boot/bzimage and fetch its module as soon as an Unraid update is staged" \
@@ -428,7 +436,7 @@ flash_free_kb() {
 }
 
 status_json() {
-  local running pending conflict targets hook first k line pending_ok pci state reason power experimental fw
+  local running pending conflict targets hook first k line pending_ok pci state reason power blocked experimental known_bad is_held held fw
   running=$(running_kernel)
   pending=$(pending_kernel || true)
   [ "$pending" = "$running" ] && pending=""
@@ -478,15 +486,29 @@ status_json() {
   printf '"kernel_log":%s,' "$(kernel_log_lines | tail -n 20 | json_list)"
   printf '"verdicts":['
   first=1
-  while IFS='|' read -r pci state reason power; do
+  while IFS='|' read -r pci state reason power blocked; do
     [ -n "$pci" ] || continue
     [ "$first" = 1 ] || printf ','
     first=0
-    printf '{"address":%s,"state":%s,"reason":%s,"power_off":%s}' \
-      "$(json_str "$pci")" "$(json_str "$state")" "$(json_str "$reason")" "$(json_bool test "$power" = yes)"
+    printf '{"address":%s,"state":%s,"reason":%s,"power_off":%s,"blocked":%s}' \
+      "$(json_str "$pci")" "$(json_str "$state")" "$(json_str "$reason")" "$(json_bool test "$power" = yes)" "$(json_bool test "$blocked" = yes)"
   done < <(verdicts)
   printf '],'
   printf '"power_off_required":%s,' "$(json_bool power_off_required)"
+  printf '"nvidia_blocked":%s,' "$(json_bool nvidia_blocked)"
+  printf '"held":['
+  first=1
+  while IFS='|' read -r pci k reason; do
+    [ -n "$pci" ] || continue
+    [ "$first" = 1 ] || printf ','
+    first=0
+    printf '{"address":%s,"kernel":%s,"reason":%s}' "$(json_str "$pci")" "$(json_str "$k")" "$(json_str "$reason")"
+  done < <(held_cards)
+  printf '],'
+  printf '"known_bad_chips":%s,' "$(json_str "$KNOWN_BAD_CHIPS")"
+  printf '"known_bad_note":%s,' "$(json_str "$KNOWN_BAD_NOTE")"
+  printf '"known_bad_url":%s,' "$(json_str "$KNOWN_BAD_URL")"
+  held=$(held_cards | cut -d'|' -f1 | tr '\n' ' ')
   printf '"cards":['
   first=1
   while read -r line; do
@@ -498,9 +520,13 @@ status_json() {
     # Upstream marks Turing and Ada Lovelace experimental.
     experimental=false
     case "$5" in TU* | AD*) experimental=true ;; esac
-    printf '{"address":%s,"device":%s,"driver":%s,"supported":%s,"chip":%s,"experimental":%s,"name":%s}' \
+    known_bad=false
+    [ "$5" = - ] || ! chip_known_bad "$5" || known_bad=true
+    is_held=false
+    case " $held " in *" $1 "*) is_held=true ;; esac
+    printf '{"address":%s,"device":%s,"driver":%s,"supported":%s,"chip":%s,"experimental":%s,"known_bad":%s,"held":%s,"name":%s}' \
       "$(json_str "$1")" "$(json_str "$2")" "$(json_str "$3")" "$(json_bool test "$4" = yes)" \
-      "$(json_str "${5#-}")" "$experimental" "$(json_str "$(card_name "$1" "$2")")"
+      "$(json_str "${5#-}")" "$experimental" "$known_bad" "$is_held" "$(json_str "$(card_name "$1" "$2")")"
   done < <(nvidia_cards)
   printf '],'
   printf '"releases":%s' "$(json_str "$RELEASES_PAGE")"
@@ -508,7 +534,7 @@ status_json() {
 }
 
 status_text() {
-  local running pending targets line name chip
+  local running pending targets line name chip held flag
   running=$(running_kernel)
   pending=$(pending_kernel || true)
   [ "$pending" = "$running" ] && pending=""
@@ -544,8 +570,14 @@ status_text() {
     echo "                still so after a reboot means nvidia did not load (is the Nvidia-Driver plugin installed?)"
     echo "gpu_unlock:     $(module_loaded && echo 'loaded (not by the hook)' || echo 'not loaded (expected until the next boot)')"
   fi
-  verdicts | awk -F '|' '{ printf "%s: %s%s%s\n", $1, $2, ($3 != "" ? " (" $3 ")" : ""), ($4 == "yes" ? "  POWER OFF REQUIRED" : "") }' | sed 's/^/  /'
+  verdicts | awk -F '|' '{ printf "%s: %s%s%s%s\n", $1, $2, ($3 != "" ? " (" $3 ")" : ""), ($4 == "yes" ? "  POWER OFF REQUIRED" : ""), ($5 == "yes" ? "  NVIDIA DRIVER BLOCKED" : "") }' | sed 's/^/  /'
   kernel_log_lines | tail -n 20 | sed 's/^/  /'
+  held=$(held_cards)
+  if [ -n "$held" ]; then
+    echo
+    echo "=== held back (gpu-unlock-ctl targets release ADDR to try again) ==="
+    printf '%s\n' "$held" | awk -F '|' '{ printf "  %s: %s (kernel %s)\n", $1, $3, $2 }'
+  fi
   echo
   echo "=== NVIDIA cards ==="
   while read -r line; do
@@ -555,7 +587,9 @@ status_text() {
     name=$(card_name "$1" "$2")
     chip=${5:-}
     chip=${chip#-}
-    echo "$1  device=$2  driver=$3  supported=$4${chip:+  chip=$chip}${name:+  $name}"
+    flag=""
+    [ "$5" = - ] || ! chip_known_bad "$5" || flag="  KNOWN TO FAIL with gpu_unlock $MODULE_VERSION ($KNOWN_BAD_URL)"
+    echo "$1  device=$2  driver=$3  supported=$4${chip:+  chip=$chip}${name:+  $name}$flag"
   done < <(nvidia_cards)
   if [ -z "$ROOT" ] && command -v nvidia-smi >/dev/null 2>&1; then
     echo
@@ -568,7 +602,7 @@ status_text() {
 # ---------------------------------------------------------------------------
 
 targets_cmd() {
-  local list pci line found supported
+  local list pci line found supported chip
   case "${1:-show}" in
     show)
       case "$(targets_source)" in
@@ -590,10 +624,12 @@ targets_cmd() {
             if [ "$1" = "$pci" ]; then
               found=1
               supported=$4
+              chip=$5
             fi
           done < <(nvidia_cards)
           [ "$found" = 1 ] || die "$pci is not an NVIDIA display controller on this server"
           [ "$supported" = yes ] || die "$pci is not a card gpu_unlock $MODULE_VERSION supports"
+          ! chip_known_bad "$chip" || die "$pci is a $chip card, and $KNOWN_BAD_NOTE ($KNOWN_BAD_URL)"
         done
       fi
       printf '%s\n' "$list" | atomic_write "$TARGETS_FILE" 0644 || die "cannot write $TARGETS_FILE"
@@ -604,7 +640,20 @@ targets_cmd() {
       rm -f "$TARGETS_FILE"
       echo "targets cleared; the hook does nothing at the next boot unless the kernel command line names cards"
       ;;
-    *) die "usage: gpu-unlock-ctl targets [show | set all|ADDR[,ADDR...] | clear]" ;;
+    release)
+      # A card the hook holds back after an unlock that kept it is tried again.
+      list=${2:-}
+      valid_targets "$list" || die "usage: gpu-unlock-ctl targets release ADDR|all"
+      if [ "$list" = all ]; then
+        rm -f "${HELD_DIR:?}"/* 2>/dev/null
+      else
+        for pci in ${list//,/ }; do
+          rm -f "$HELD_DIR/$pci"
+        done
+      fi
+      echo "$list: tried again at the next boot"
+      ;;
+    *) die "usage: gpu-unlock-ctl targets [show | set all|ADDR[,ADDR...] | clear | release ADDR|all]" ;;
   esac
 }
 
@@ -613,14 +662,14 @@ targets_cmd() {
 # ---------------------------------------------------------------------------
 
 report_cmd() {
-  local unlocked=0 failed=0 pending=0 lines="" pci state reason power
+  local unlocked=0 failed=0 pending=0 lines="" pci state reason power blocked
   case "$(cat "$HOOK_STATUS" 2>/dev/null)" in loaded:*) ;; *) return 0 ;; esac
   # Keep this boot's kernel log lines: the ring buffer forgets them after
   # enough uptime, and the verdicts are read from them as long as the boot lasts.
   if [ ! -s "$KERNEL_LOG_SNAPSHOT" ]; then
     kernel_log_lines | atomic_write "$KERNEL_LOG_SNAPSHOT" 0644 2>/dev/null || true
   fi
-  while IFS='|' read -r pci state reason power; do
+  while IFS='|' read -r pci state reason power blocked; do
     [ -n "$pci" ] || continue
     case "$state" in
       unlocked) unlocked=$((unlocked + 1)) ;;
@@ -631,7 +680,10 @@ report_cmd() {
     lines="$lines$pci: $state${reason:+ ($reason)}
 "
   done < <(verdicts)
-  if power_off_required; then
+  if nvidia_blocked; then
+    notify_once report alert "GPU Unlock: unlock failed and the NVIDIA driver could not load" \
+      "The unlock stopped half-way and the module kept the card, so the NVIDIA driver cannot load it this boot. The card is held back from the next boot: reboot, and the driver loads as usual. It is tried again by itself when a new gpu_unlock is released, or now from Settings, User Utilities, GPU Unlock (Try again). $(printf '%s' "$lines" | tr '\n' ' ')"
+  elif power_off_required; then
     notify_once report alert "GPU Unlock: power off required" \
       "A card reported that it cannot be unlocked until the server is powered off (not just rebooted). NVIDIA drives it locked for now. $(printf '%s' "$lines" | tr '\n' ' ')"
   elif [ "$failed" -gt 0 ]; then
@@ -651,7 +703,7 @@ report_cmd() {
 uninstall_cmd() {
   rm -f "$MODPROBE_CONF" "$CRON_FILE"
   [ -x "$UPDATE_CRON_BIN" ] && "$UPDATE_CRON_BIN" >/dev/null 2>&1 || true
-  rm -rf "${MODULES_DIR:?}" "$HOOK_DST" "$DISABLED_MARKER" "$FLASH_DIR/.firmware.new"
+  rm -rf "${MODULES_DIR:?}" "$HOOK_DST" "$DISABLED_MARKER" "$FLASH_DIR/.firmware.new" "${HELD_DIR:?}" "$KNOWN_BAD_FILE"
   if [ "${1:-}" = --purge ]; then
     rm -rf "${FLASH_DIR:?}"
     echo "removed the modprobe rule, the hook, the modules, the firmware and the settings"

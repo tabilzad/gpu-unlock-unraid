@@ -52,6 +52,14 @@ if ($gu_action === 'targets') {
     }
     $gu_args = ['targets', 'set', $gu_list];
     $gu_timeout = 10;
+} elseif ($gu_action === 'release') {
+    // Try a held-back card again: one full PCI address, or all of them.
+    $gu_addr = $_POST['address'] ?? '';
+    if (!is_string($gu_addr) || !preg_match('/^(all|[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7])$/', $gu_addr)) {
+        gu_fail(400, 'address must be a full PCI address or all');
+    }
+    $gu_args = ['targets', 'release', $gu_addr];
+    $gu_timeout = 10;
 } elseif (isset($gu_actions[$gu_action])) {
     [$gu_args, $gu_timeout] = $gu_actions[$gu_action];
 } else {

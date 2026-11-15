@@ -3,6 +3,32 @@
 All notable changes to the GPU Unlock plugin for Unraid. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Fixed
+
+- A Turing card left the server without an NVIDIA driver at every boot
+  ([#3](https://github.com/tabilzad/gpu-unlock-unraid/issues/3)): gpu_unlock
+  2.0.0 fails on Turing (upstream
+  [#242](https://github.com/Zagitta/gpu-unlock/issues/242)) and, since the
+  transaction stopped half-way, keeps the card's BAR and DMA buffers until
+  power off, so nvidia's probe failed and `modprobe nvidia` exited 1. The
+  page called this "Power off required", which does not help.
+  - The boot rule now holds such a card back from the next boot (a marker
+    on the flash drive, keyed to the module version), so the driver loads
+    again after one reboot. The page shows the card as held back with the
+    reason and a Try again button; `gpu-unlock-ctl targets release ADDR`
+    does the same; a new gpu_unlock version drops the marker by itself.
+  - Chips the pinned gpu_unlock is known to fail on (`KNOWN_BAD_CHIPS` in
+    `versions.env`, Turing for 2.0.0) are not offered on the page, refused
+    by `targets set`, and left alone by the boot rule also under "every
+    supported card", with a notice naming the upstream issue and fix.
+  - A kept card is reported as "failed ... the module kept the card, so the
+    NVIDIA driver could not load it this boot" (`blocked` in the verdict,
+    `nvidia_blocked` in the status), with its own alert notification. "Power
+    off required" is kept for the case it describes: a card the driver had
+    already started since power on (WPR2 up).
+
 ## [0.4.0] - 2026-11-13
 
 ### Added

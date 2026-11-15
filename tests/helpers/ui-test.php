@@ -86,6 +86,16 @@ $m = gu_model(['power_off_required' => true, 'verdicts' => [['address' => '0000:
 check('model: power off required leads', $m['headline']['tone'] === 'bad' && str_starts_with($m['headline']['text'], 'Power off required') && $m['notices'] === [] && $m['steps'][4]['tone'] === 'bad'
     && $m['rows'][0]['result']['power_off'] === true && $m['tiles'][0]['value'] === 'Power off');
 
+$m = gu_model(['nvidia_blocked' => true, 'verdicts' => [['address' => '0000:01:00.0', 'state' => 'failed', 'reason' => 'unlock failed (-19); the module kept the card', 'power_off' => false, 'blocked' => true]],
+    'held' => [['address' => '0000:01:00.0', 'kernel' => '6.18.58-Unraid', 'reason' => 'unlock failed (-19); the module kept the card']]] + $booted);
+check('model: a kept card blocks the driver and is held back', $m['headline']['tone'] === 'bad' && str_starts_with($m['headline']['text'], '1 card failed to unlock and the NVIDIA driver could not load it')
+    && $m['tiles'][0]['value'] === 'Driver blocked' && $m['rows'][0]['result']['blocked'] === true && $m['rows'][0]['held']['kernel'] === '6.18.58-Unraid'
+    && count(array_filter($m['notices'], static fn (array $n): bool => str_contains($n['text'], 'is held back'))) === 1);
+$m = gu_model(['targets' => 'all', 'known_bad_note' => 'this version fails on it', 'known_bad_url' => 'https://example.test/1',
+    'cards' => [['address' => '0000:01:00.0', 'device' => '0x1e07', 'driver' => 'nvidia', 'supported' => true, 'chip' => 'TU102', 'experimental' => true, 'known_bad' => true, 'name' => 'RTX 2080 Ti']]] + $base);
+check('model: a known-bad card is never chosen and a notice says why', $m['rows'][0]['known_bad'] === true && $m['rows'][0]['chosen'] === false && $m['tiles'][2]['value'] === 'All'
+    && count(array_filter($m['notices'], static fn (array $n): bool => str_contains($n['text'], 'not offered') && str_contains($n['text'], 'https://example.test/1'))) === 1);
+
 $m = gu_model(['firmware_job' => true, 'firmware_phase' => 'download', 'firmware_log' => ['a', 'b'], 'firmware_state' => 'missing', 'firmware_present' => false] + $base);
 check('model: a running generation shows its phases', $m['job'] === true && $m['steps'][1]['tone'] === 'info'
     && array_column($m['steps'][1]['phases'], 'state') === ['done', 'active', 'todo', 'todo'] && $m['steps'][1]['log'] === ['a', 'b']);
