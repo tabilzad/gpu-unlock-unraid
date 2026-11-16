@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Community Applications wrapper for the GPU Unlock plugin. The feed repository
+  (tabilzad/unraid-plugins) carries an unchanged copy as plugins/gpu-unlock.xml;
+  ca/README.md describes the flow. PluginURL, MinVer and Support must be
+  identical to the pluginURL, min and support attributes of
+  plugin/gpu-unlock.plg.in (make lint-ca checks that). Community Applications
+  shows the plg's support link, so a new support link needs a plugin release.
+  While RequiresFile is missing, Community Applications shows Requires and
+  offers no Install button: the plugin does nothing without the NVIDIA driver.
+-->
+<Plugin>
+  <Name>GPU Unlock</Name>
+  <PluginURL>https://github.com/tabilzad/gpu-unlock-unraid/releases/latest/download/gpu-unlock.plg</PluginURL>
+  <PluginAuthor>tabilzad</PluginAuthor>
+  <Support>https://github.com/tabilzad/gpu-unlock-unraid/issues</Support>
+  <Project>https://github.com/tabilzad/gpu-unlock-unraid</Project>
+  <ReadMe>https://raw.githubusercontent.com/tabilzad/gpu-unlock-unraid/main/README.md</ReadMe>
+  <Overview>
+    Runs the gpu_unlock kernel module from Zagitta/gpu-unlock at boot, which unlocks the full FP16/BF16 tensor rate of GeForce RTX 30 series cards (Ampere: RTX 3090, 3080 Ti, 3080, 3070, 3060 ...) before the NVIDIA driver binds them. RTX 40 series (Ada Lovelace) support is experimental, as upstream marks it. RTX 20 series (Turing) cards are not offered with gpu_unlock 2.0.0, which fails on them. The NVIDIA driver itself is not patched.
+
+    A modprobe rule on the flash drive runs the unlock at the moment the Nvidia-Driver plugin's driver loads, then lets the driver load as usual. The settings page (Settings, User Utilities, GPU Unlock) walks through the setup: the kernel module for the next boot's kernel, the firmware, the cards to unlock, the boot rule and a power cycle. Afterwards it shows each card's result. If an unlock stops half-way and the module keeps the card, the NVIDIA driver cannot use that card for the rest of that boot; the plugin then leaves the card alone at the next boot, so the driver works again.
+
+    The kernel module is built by the project's CI for every Unraid kernel from a pinned upstream commit and fetched from its GitHub releases, also ahead of a staged Unraid update. The firmware is generated on your server once, in Docker, from NVIDIA's own driver downloads checked against pinned SHA-256 sums. No NVIDIA file is redistributed.
+
+    Requirements: Unraid 7.1.0 or newer, the Nvidia-Driver plugin, Docker enabled once to generate the firmware (about 370 MB downloaded), and about 120 MB free on the flash drive. Not affiliated with NVIDIA, Lime Technology or the gpu-unlock authors.
+  </Overview>
+  <Category>Drivers: Tools:System</Category>
+  <Icon>https://raw.githubusercontent.com/tabilzad/gpu-unlock-unraid/main/ca/gpu-unlock.png</Icon>
+  <License>GPL-2.0-only</License>
+  <MinVer>7.1.0</MinVer>
+  <Beta>true</Beta>
+  <Requires>The Nvidia-Driver plugin (Apps, search for Nvidia-Driver). Install it first: the unlock runs when the NVIDIA driver loads, so without the driver nothing triggers it.</Requires>
+  <RequiresFile>/var/log/plugins/nvidia-driver.plg</RequiresFile>
+  <ExtraSearchTerms>nvidia gpu_unlock gpu-unlock fp16 bf16 tensor geforce rtx 3090 3080 3070 3060 ampere ada unlock</ExtraSearchTerms>
+  <Changes>
+    See https://github.com/tabilzad/gpu-unlock-unraid/blob/main/CHANGELOG.md. The plugin manager shows the latest three entries from the plugin's own change log.
+  </Changes>
+</Plugin>

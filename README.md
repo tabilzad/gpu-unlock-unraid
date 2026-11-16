@@ -60,7 +60,10 @@ line) and load the driver themselves from the plugin phase minutes later,
 which makes them depend on plugin filename order and needs careful fallback
 code so a failed plugin does not leave the server without a driver. The
 install rule used here runs at the moment udev would have loaded the driver,
-so the driver's timing is unchanged and the only failure mode is "no unlock".
+so the driver's timing is unchanged and nvidia loads whatever the hook does.
+A failed unlock normally leaves the card locked and nothing else; the one
+exception, a card the module kept, costs that card the driver for one boot
+(see [Disable, remove, recover](#disable-remove-recover)).
 The per-card verdicts and the card selection on the page follow their lead.
 
 Since 2.0, Zagitta/gpu-unlock also carries an Unraid plugin of its own
@@ -116,7 +119,9 @@ GitHub issue. The page follows the WebGUI theme (black, white, azure, gray).
 
 ## Install
 
-1. Plugins, Install Plugin, paste
+1. Apps, search for "GPU Unlock" and install it (Community Applications
+   offers it once the Nvidia-Driver plugin is installed). Or Plugins, Install
+   Plugin, paste
    `https://github.com/tabilzad/gpu-unlock-unraid/releases/latest/download/gpu-unlock.plg`.
    The install fetches the module for your kernel and writes the modprobe
    rule. Nothing is loaded yet.
@@ -225,7 +230,7 @@ to fetch modules from a fork.
 ## Building and developing
 
 ```sh
-./scripts/dev-env --root make check          # lint (shellcheck, shfmt, php -l, escaping, node --check, xmllint, actionlint) and tests
+./scripts/dev-env --root make check          # lint (shellcheck, shfmt, php -l, escaping, node --check, xmllint, CA wrapper, actionlint) and tests
 ./scripts/dev-env make build                 # dist/gpu-unlock-<version>.txz and a dev gpu-unlock.plg
 ./scripts/build-module --kver 6.18.58-Unraid # the module for one kernel (Docker; caches the ~300 MB tree)
 make firmware-gen                            # build and run the on-box generator here, into dist/firmware
@@ -247,7 +252,8 @@ by Unraid is date based (`YYYY.MM.DD.N`), derived from the tag.
 
 Layout: `src/` is the package tree rooted at `/`, `plugin/` the plg template
 and Slackware description, `docker/` the module build, `scripts/` the build
-tooling, `versions.env` the pinned upstream commit.
+tooling, `versions.env` the pinned upstream commit, `ca/` the Community
+Applications wrapper and icon (see [ca/README.md](ca/README.md)).
 
 ## Credits
 

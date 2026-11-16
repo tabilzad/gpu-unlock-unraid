@@ -9,7 +9,7 @@ SHELL := /bin/bash
 
 PLUGIN     := gpu-unlock
 PLUGIN_DIR := src/usr/local/emhttp/plugins/$(PLUGIN)
-SH_FILES   := scripts/build-txz scripts/render-plg scripts/lint-plg scripts/plugin-version scripts/discover-kernels \
+SH_FILES   := scripts/build-txz scripts/render-plg scripts/lint-plg scripts/lint-ca scripts/plugin-version scripts/discover-kernels \
               scripts/dev-env scripts/build-module \
               src/usr/local/sbin/gpu-unlock-ctl $(PLUGIN_DIR)/scripts/lib.sh \
               $(PLUGIN_DIR)/scripts/post-install $(PLUGIN_DIR)/scripts/remove \
@@ -20,12 +20,12 @@ JS_FILES   := $(shell find src -name '*.js' | sort)
 PAGE_FILES := $(shell find src -name '*.page' | sort)
 KVER       ?= 6.18.58-Unraid
 
-.PHONY: check lint test build module firmware-gen fmt lint-shell lint-php lint-escaping lint-js lint-plg lint-workflows
+.PHONY: check lint test build module firmware-gen fmt lint-shell lint-php lint-escaping lint-js lint-plg lint-ca lint-workflows
 
 check: lint test
 	@echo "check: ok"
 
-lint: lint-shell lint-php lint-escaping lint-js lint-plg lint-workflows
+lint: lint-shell lint-php lint-escaping lint-js lint-plg lint-ca lint-workflows
 	@echo "lint: ok"
 
 lint-shell:
@@ -58,6 +58,10 @@ lint-plg:
 	  --txz-sha256 0000000000000000000000000000000000000000000000000000000000000000 \
 	  --out .tmp/lint/$(PLUGIN).plg > /dev/null
 	./scripts/lint-plg .tmp/lint/$(PLUGIN).plg
+
+# The Community Applications wrapper (ca/) against the plg rendered above.
+lint-ca: lint-plg
+	./scripts/lint-ca --plg .tmp/lint/$(PLUGIN).plg
 
 lint-workflows:
 	@if command -v actionlint > /dev/null 2>&1; then echo "actionlint"; actionlint; else echo "lint-workflows: actionlint not installed, skipped"; fi

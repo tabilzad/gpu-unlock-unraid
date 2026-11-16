@@ -1,0 +1,117 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0-only
+# lint-ca: check the Community Applications wrapper against the rendered plg.
+#
+#   lint-ca --plg RENDERED.plg [--wrapper ca/gpu-unlock.xml] [--icon ca/gpu-unlock.png]
+#
+# Checks: the wrapper is well formed; its PluginURL, MinVer and Support are
+# identical to the plg's pluginURL, min and support attributes (CA requires
+# the first and shows the plg's own values for the other two, so a difference
+# would only mislead); the required elements are present; Beta is true or
+# false; every category is one CA knows; RequiresFile, when present, is an
+# absolute path; the Icon URL names the repository icon, which must be a
+# 256x256 PNG; no placeholders remain.
+set -euo pipefail
+
+die() {
+  printf 'lint-ca: %s\n' "$*" >&2
+  exit 1
+}
+
+# The category names Community Applications accepts (its feed, 2026-11-15).
+KNOWN_CATEGORIES=" AI: Backup: Cloud: Crypto: Downloaders: Drivers: GameServers: HomeAutomation:
+ MediaApp: MediaApp:Books MediaApp:Music MediaApp:Photos MediaApp:Video MediaApp:Other
+ MediaServer: MediaServer:Books MediaServer:Music MediaServer:Photos MediaServer:Video MediaServer:Other
+ Network: Network:DNS Network:FTP Network:Management Network:Messenger Network:Proxy Network:Voip
+ Network:VPN Network:Privacy Network:Web Network:Other
+ Plugins: Productivity: Security: Tools: Tools:System Tools:Utilities Other: "
+
+REPO_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+plg=""
+wrapper="$REPO_ROOT/ca/gpu-unlock.xml"
+icon="$REPO_ROOT/ca/gpu-unlock.png"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --plg)
+      plg=${2:-}
+      shift 2
+      ;;
+    --wrapper)
+      wrapper=${2:-}
+      shift 2
+      ;;
+    --icon)
+      icon=${2:-}
+      shift 2
+      ;;
+    *) die "unknown argument '$1'" ;;
+  esac
+done
+[ -n "$plg" ] || die "--plg is required"
+for f in "$plg" "$wrapper" "$icon"; do
+  [ -r "$f" ] || die "cannot read $f"
+done
+
+xmllint --noout "$wrapper" 2>/dev/null || die "$wrapper is not well-formed XML"
+[ "$(xmllint --xpath 'name(/*)' "$wrapper" 2>/dev/null)" = Plugin ] || die "the wrapper's root element must be <Plugin>"
+
+# xp FILE XPATH: the string value of an XPath expression, trimmed.
+xp() {
+  { xmllint --noent --xpath "$2" "$1" 2>/dev/null || true; } | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | tr -d '\n'
+}
+
+plg_url=$(xp "$plg" 'string(/PLUGIN/@pluginURL)')
+[ -n "$plg_url" ] || die "the plg has no pluginURL attribute"
+ca_url=$(xp "$wrapper" 'normalize-space(/Plugin/PluginURL)')
+[ "$ca_url" = "$plg_url" ] || die "PluginURL mismatch: wrapper '$ca_url', plg '$plg_url'"
+
+plg_min=$(xp "$plg" 'string(/PLUGIN/@min)')
+ca_min=$(xp "$wrapper" 'normalize-space(/Plugin/MinVer)')
+[ "$ca_min" = "$plg_min" ] || die "MinVer mismatch: wrapper '$ca_min', plg min '$plg_min'"
+
+plg_support=$(xp "$plg" 'string(/PLUGIN/@support)')
+ca_support=$(xp "$wrapper" 'normalize-space(/Plugin/Support)')
+[ "$ca_support" = "$plg_support" ] || die "Support mismatch: wrapper '$ca_support', plg support '$plg_support'"
+
+for el in Name PluginAuthor Overview Category Icon License Project; do
+  [ -n "$(xp "$wrapper" "normalize-space(/Plugin/$el)")" ] || die "wrapper: <$el> is empty or missing"
+done
+
+beta=$(xp "$wrapper" 'normalize-space(/Plugin/Beta)')
+case "$beta" in
+  true | false) ;;
+  *) die "Beta must be true or false, got '$beta'" ;;
+esac
+
+for cat in $(xp "$wrapper" 'normalize-space(/Plugin/Category)'); do
+  case "$KNOWN_CATEGORIES" in
+    *" $cat "*) ;;
+    *) die "unknown category '$cat' (see KNOWN_CATEGORIES in $0)" ;;
+  esac
+done
+
+requires_file=$(xp "$wrapper" 'normalize-space(/Plugin/RequiresFile)')
+case "$requires_file" in
+  "" | /*) ;;
+  *) die "RequiresFile must be an absolute path, got '$requires_file'" ;;
+esac
+if [ -n "$requires_file" ] && [ -z "$(xp "$wrapper" 'normalize-space(/Plugin/Requires)')" ]; then
+  die "RequiresFile without Requires: CA would hide Install without saying why"
+fi
+
+icon_url=$(xp "$wrapper" 'normalize-space(/Plugin/Icon)')
+case "$icon_url" in
+  https://*) ;;
+  *) die "Icon must be an https URL, got '$icon_url'" ;;
+esac
+[ "${icon_url##*/}" = "$(basename -- "$icon")" ] || die "Icon URL '$icon_url' does not name $(basename -- "$icon")"
+# PNG signature, then the IHDR width and height (bytes 16-23, big endian).
+header=$(head -c 24 -- "$icon" | od -An -tx1 | tr -d ' \n')
+[ "${header:0:16}" = "89504e470d0a1a0a" ] || die "$icon is not a PNG file"
+[ "${header:32:16}" = "0000010000000100" ] || die "$icon is not 256x256"
+
+if grep -q -E 'YOUR_|example\.com|TODO|FIXME' "$wrapper"; then
+  die "placeholder text left in $wrapper"
+fi
+
+printf 'lint-ca: ok (%s)\n' "$plg_url"
